@@ -136,13 +136,12 @@ def pca(table, method="svd", number_of_dimensions=0, inplace=False, seed=None, w
     
 
     if method == "eigh":
-        if m > n:
-            matrix_data = dot(centered_table.T, centered_table)
-        else:
-            matrix_data = dot(centered_table, centered_table.T)
-            
+
+        matrix_data = dot(centered_table.T, centered_table)
+        
         eigvals, eigvecs = eigh(matrix_data)
         long_method_name = f"Principal Component Analysis Using Full Eigendecomposition"
+        
         eigvals = np.flip(eigvals, axis = 0)
         eigvecs = np.flip(eigvecs, axis = 1)
         
@@ -153,7 +152,6 @@ def pca(table, method="svd", number_of_dimensions=0, inplace=False, seed=None, w
         long_method_name = f"Principal Component Analysis with SVD"
 
     elif method == "fsvd":
-        
         num_dimensions = number_of_dimensions
         if 0 < number_of_dimensions < 1:
             warn(
@@ -165,10 +163,7 @@ def pca(table, method="svd", number_of_dimensions=0, inplace=False, seed=None, w
                 RuntimeWarning,
             )
             num_dimensions = n
-        if m > n:
-            matrix_data = dot(centered_table.T, centered_table)
-        else:
-            matrix_data = dot(centered_table, centered_table.T)
+        matrix_data = dot(centered_table.T, centered_table)
             
         eigvals, eigvecs = _fsvd(matrix_data, num_dimensions, seed=seed)
         long_method_name = "Approximate Principal Coordinate Analysis using FSVD"
@@ -230,12 +225,13 @@ def pca(table, method="svd", number_of_dimensions=0, inplace=False, seed=None, w
     eigvecs = eigvecs[:, :number_of_dimensions]
     eigvals = eigvals[:number_of_dimensions]
     proportion_explained = proportion_explained[:number_of_dimensions]
-    if (method == "fsvd" or method == "eigh") and m > n:
+    
+    if (method == "fsvd" or method == "eigh"):
         coordinates = dot(centered_table, eigvecs)
     else:
         eigvecs *= np.sqrt(eigvals * (n-1))
         coordinates = eigvecs
-    # coordinates -= dot(np.reshape(mean_, (1, -1)), eigvecs)
+        
 
     axis_labels = ["PC%d" % i for i in range(1, number_of_dimensions + 1)]
 
