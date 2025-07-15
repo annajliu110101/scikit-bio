@@ -26,7 +26,15 @@ from skbio.binaries import (
 )
 from skbio.util._decorator import params_aliased
 
-def pca(table, method="svd", number_of_dimensions=0, inplace=False, seed=None, warn_neg_eigval=0.01, output_format=None):
+@params_aliased([("dimensions", "number_of_dimensions", "0.7.0", False)])
+def pca(table, 
+        method="svd", 
+        dimensions=0, 
+        inplace=False, 
+        seed=None, 
+        warn_neg_eigval=0.01, 
+        output_format=None,
+       ):
     '''Perform Principal Coordinate Analysis (PCA).
     PCA is an ordination method operating on sample x observation tables,
     calculated using Euclidean distances. 
@@ -41,9 +49,6 @@ def pca(table, method="svd", number_of_dimensions=0, inplace=False, seed=None, w
     feature space, which will need to be converted back to sample space
     when computing the samples/coordinates.  
 
-    
-
-    
     Parameters
     ----------
     table : Table-like object
@@ -94,9 +99,8 @@ def pca(table, method="svd", number_of_dimensions=0, inplace=False, seed=None, w
     feature_table, sample_ids, feature_ids = _ingest_table(feature_table)
     
     m, n = feature_table.shape
-    
 
-    if number_of_dimensions == 0:
+    if dimensions == 0:
         if method == "fsvd" and n > 10:
             warn(
                 "FSVD: since no value for number_of_dimensions is specified, "
@@ -107,8 +111,8 @@ def pca(table, method="svd", number_of_dimensions=0, inplace=False, seed=None, w
                 RuntimeWarning,
             )
 
-        number_of_dimensions = n
-    elif number_of_dimensions < 0:
+        dimensions = n
+    elif dimensions < 0:
         raise ValueError(
             "Invalid operation: cannot reduce table "
             "to negative dimensions using PCA. Did you intend "
@@ -116,11 +120,11 @@ def pca(table, method="svd", number_of_dimensions=0, inplace=False, seed=None, w
             "the number_of_dimensions equal to the "
             "number of features in the given table?"
         )
-    elif number_of_dimensions > n:
+    elif dimensions > n:
         raise ValueError(
             "Invalid operation: cannot extend past number of features."
         )
-    elif not isinstance(number_of_dimensions, Integral) and number_of_dimensions > 1:
+    elif not isinstance(dimensions, Integral) and dimensions > 1:
         raise ValueError(
             "Invalid operation: A floating-point number greater than 1 cannot be "
             "supplied as the number of dimensions."
@@ -134,7 +138,6 @@ def pca(table, method="svd", number_of_dimensions=0, inplace=False, seed=None, w
 
     
     centered_table = scale(feature_table, with_std = False, copy = not inplace)
-    
 
     if method == "eigh":
 
@@ -148,13 +151,13 @@ def pca(table, method="svd", number_of_dimensions=0, inplace=False, seed=None, w
         
     elif method == "svd":
         matrix_data = centered_data
-        eigvecs, s, _ = svd(matrix_data, full_matrices = False)
+        eigvecs, s, V = svd(matrix_data, full_matrices = False)
         eigvals = (s**2)/(n-1)
         long_method_name = f"Principal Component Analysis with SVD"
 
     elif method == "fsvd":
-        num_dimensions = number_of_dimensions
-        if 0 < number_of_dimensions < 1:
+        num_dimensions = dimensions
+        if 0 < dimensions < 1:
             warn(
                 "FSVD: since value for number_of_dimensions is specified as float, "
                 "PCoA for all dimensions will be computed, which may "
@@ -174,7 +177,7 @@ def pca(table, method="svd", number_of_dimensions=0, inplace=False, seed=None, w
         )
 
     # Ensure number_of_dimensions does not exceed available dimensions
-    # number_of_dimensions = min(number_of_dimensions, eigvals.shape[0])
+    # dimensions = min(dimensions, eigvals.shape[0])
 
     # cogent makes eigenvalues positive by taking the
     # abs value, but that doesn't seem to be an approach accepted
@@ -213,42 +216,37 @@ def pca(table, method="svd", number_of_dimensions=0, inplace=False, seed=None, w
     
     proportion_explained = eigvals / sum_eigvals
 
-    if 0 < number_of_dimensions < 1:
+    if 0 < dimensions < 1:
         # gives the number of dimensions needed to reach specified variance
         # updates number of dimensions to reach the requirement of variance.
         cumulative_variance = np.cumsum(proportion_explained)
         num_dimensions = (
-            np.searchsorted(cumulative_variance, number_of_dimensions, side="left") + 1
+            np.searchsorted(cumulative_variance, dimensions, side="left") + 1
         )
         
-        number_of_dimensions = num_dimensions
+        dimensions = num_dimensions
     
-    eigvecs = eigvecs[:, :number_of_dimensions]
-    eigvals = eigvals[:number_of_dimensions]
-    proportion_explained = proportion_explained[:number_of_dimensions]
+    eigvecs = eigvecs[:, :dimensions]
+    eigvals = eigvals[:dimensions]
+    proportion_explained = proportion_explained[:dimensions]
     
     if (method == "fsvd" or method == "eigh"):
         coordinates = dot(centered_table, eigvecs)
+        loadings = eigvecs
     else:
+        loadings = V[:, :dimensions].T
         eigvecs *= np.sqrt(eigvals * (n-1))
         coordinates = eigvecs
         
-
-    axis_labels = ["PC%d" % i for i in range(1, number_of_dimensions + 1)]
-
-    return OrdinationResults(
-        short_method_name="PCA",
-        long_method_name=long_method_name,
-        eigvals=_create_table_1d(eigvals, index=axis_labels, backend=output_format),
-        samples=_create_table(
-            coordinates,
-            index=sample_ids,
-            columns=axis_labels,
-            backend=output_format,
-        ),
-        proportion_explained=_create_table_1d(
-            proportion_explained, index=axis_labels, backend=output_format
-        ),
+    return _encapsulate_pca_result(
+        long_method_name,
+        eigvals,
+        coordinates,
+        loadings,
+        proportion_explained,
+        sample_ids,
+        feature_ids,
+        output_format,
     )
 
 @params_aliased([("dimensions", "number_of_dimensions", "0.7.0", False)])
@@ -544,6 +542,33 @@ def pcoa(
         output_format,
     )
 
+def _encapsulate_pca_result(
+    long_method_name, eigvals, coordinates, loadings, proportion_explained, sample_ids, feature_ids, output_format
+):
+    dimensions = eigvals.shape[0]
+    axis_labels = ["PC%d" % i for i in range(1, dimensions + 1)]
+    return OrdinationResults(
+        short_method_name="PCA",
+        long_method_name=long_method_name,
+        eigvals=_create_table_1d(eigvals, index=axis_labels, backend=output_format),
+        samples=_create_table(
+            coordinates,
+            index=sample_ids,
+            columns=axis_labels,
+            backend=output_format,
+        ),
+        features - _create_table(
+            loadings,
+            index=feature_ids,
+            columns=axis_labels,
+            backend=output_format,
+        ),
+        proportion_explained=_create_table_1d(
+            proportion_explained, index=axis_labels, backend=output_format
+        ),
+    )
+    
+
 
 def _encapsulate_pcoa_result(
     long_method_name, eigvals, coordinates, proportion_explained, ids, output_format
@@ -555,8 +580,8 @@ def _encapsulate_pcoa_result(
 
     Parameters
     ----------
-    distance_matrix : DistanceMatrix
-        The input distance matrix.
+    long_method_name: str
+        Name of method used
     eigvals: ndarray
         Eigenvalues
     coordinates: ndarray
