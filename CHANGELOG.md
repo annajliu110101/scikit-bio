@@ -21,6 +21,8 @@
 
 ### Performance enhancements
 
+* Improved the performance of `dirmult_ttest` ([#2250](https://github.com/scikit-bio/scikit-bio/pull/2250)).
+* Improved the performance of `ancom`. This is primarily due to exploiting vectorization of the statistical testing function (such as `f_oneway`). As a consequence, a custom testing function now must accept 2-D arrays as input and return 1-D arrays. Function names available under `scipy.stats` are not impacted ([#2250](https://github.com/scikit-bio/scikit-bio/pull/2250)).
 * Added attributes `ranges` and `stops` to `AlignPath`. They facilitate locating the aligned part of each sequence as `seq[start:stop]` ([#2226](https://github.com/scikit-bio/scikit-bio/pull/2226) and [#2201](https://github.com/scikit-bio/scikit-bio/pull/2201)).
 * Improved the performance of `SubstitutionMatrix.identity`.
 * Enhanced `TabularMSA.from_path_seqs`. It now can extract the aligned region from the middle of a sequence. Also added docstring and doctests ([#2201](https://github.com/scikit-bio/scikit-bio/pull/2201)).
@@ -37,6 +39,12 @@
 
 ### Miscellaneous
 
+* In `TreeNode.root_at` and `TreeNode.root_at_midpoint`, the default value of `branch_attrs` was changed to an empty list; that of `root_name` was changed to None; that of `reset` was changed to True ([#2259](https://github.com/scikit-bio/scikit-bio/pull/2259)).
+* In `TreeNode.unrooted_copy`, the default value of `branch_attrs` was changed to `{"length", "support"}`. Specifically, "name" was removed from this set, as a node label is often an attribute of the node instead of the branch. The default value of `root_name` was changed to None ([#2259](https://github.com/scikit-bio/scikit-bio/pull/2259)).
+* In `TreeNode.copy`, the default value of `deep` was set to False. Now `tree.copy()` returns a shallow copy instead of a deep copy ([#2259](https://github.com/scikit-bio/scikit-bio/pull/2259)).
+* In `TreeNode.compare_cophenet`, the default value of `ignore_self` was set to True. Therefore the estimated cophenetic distance between trees better correlates with their discrepancy ([#2259](https://github.com/scikit-bio/scikit-bio/pull/2259)).
+* Renamed column "Reject null hypothesis" as "Signif" in `ancom` and `dirmult_ttest`'s report tables for conciseness ([#2250](https://github.com/scikit-bio/scikit-bio/pull/2250)).
+* Renmaed the parameter `significance_test` as `sig_test` in `ancom` for conciseness. The old name is preserved as an alias ([#2250](https://github.com/scikit-bio/scikit-bio/pull/2250)).
 * Set the default data type of `SubstitutionMatrix` as `np.float32` (previous it was `float`, which is equivalent to `np.float64`). Made `dtype` an optional parameter in `from_dict` and `identity` methods.
 * Adjusted the `__repr__` of `AlignPath` and `PairAlignPath` ([#2226](https://github.com/scikit-bio/scikit-bio/pull/2226) and [#2235](https://github.com/scikit-bio/scikit-bio/pull/2235)).
 * Changed `AlignPath.shape`'s type from a named tuple to a normal tuple ([#2235](https://github.com/scikit-bio/scikit-bio/pull/2235)). Let the values be native Python `int` rather than `np.int64` ([#2201](https://github.com/scikit-bio/scikit-bio/pull/2201)).
@@ -49,9 +57,13 @@
 * Remove autoplotting functionality to enable inplace operations on large in-memory objects, and improve documentation of existing plotting methods ([2216](https://github.com/scikit-bio/scikit-bio/pull/2216), [2223](https://github.com/scikit-bio/scikit-bio/pull/2223))
 * Initiated efforts to add type annotations to scikit-bio's codebase, starting with the `stats.distance` module ([2219](https://github.com/scikit-bio/scikit-bio/pull/2219))
 * Restored functionality to scikit-bio's benchmarking system and introduced a new repository for storing, running, and hosting benchmarks to prevent performance regression ([#2245](https://github.com/scikit-bio/scikit-bio/pull/2245))
+* Renamed the parameter `number_of_dimensions` to `dimensions` for the `pcoa` and `permdisp` functions. `number_of_dimensions` will remain a valid alias of the parameter, such that either option may be used. ([#2257](https://github.com/scikit-bio/scikit-bio/pull/2257)).
 
 ### Backward-incompatible changes
 
+* Removed `TreeNode.unrooted_deepcopy`. Use `TreeNode.unrooted_copy(deep=True)` instead ([#2259](https://github.com/scikit-bio/scikit-bio/pull/2259)).
+* Removed `TreeNode.deepcopy`. Use `TreeNode.copy(deep=True)` instead ([#2259](https://github.com/scikit-bio/scikit-bio/pull/2259)).
+* Removed `TreeNode.subtree`. It was a placehold but never implemented ([#2259](https://github.com/scikit-bio/scikit-bio/pull/2259)).
 * Removed the wrapper for the Striped Smith Waterman (SSW) library. Specifically, this removes `local_pairwise_align_ssw`, `StripedSmithWaterman`, and `AlignmentStructure` under `skbio.alignment`. We recommend using the new `skbio.alignment.pair_align` function for pairwise sequence alignment, or other packages that provide production-ready alignment algorithms. See [#1814](https://github.com/biocore/scikit-bio/issues/1814) for discussions.
 * Removed `skbio.alignment.make_identity_substitution_matrix`. This has been replaced with `skbio.sequence.SubstitutionMatrix.identity`.
 

@@ -21,12 +21,15 @@ from skbio.util._testing import assert_data_frame_almost_equal
 from skbio.table._tabular import _create_table, _create_table_1d, _ingest_table
 
 
+# import optional dependencies
 pl = get_package("polars", raise_error=False)
 # polars.testing isn't imported along with polars. Therefore one needs to import it
 # separately.
 if pl is not None:
     plt = get_package("polars.testing")
 adt = get_package("anndata", raise_error=False)
+torch = get_package("torch", raise_error=False)
+jnp = get_package("jax.numpy", raise_error=False)
 
 
 class TestIngest(TestCase):
@@ -53,15 +56,15 @@ class TestIngest(TestCase):
         obs = _ingest_table(table)
         self.assertIsInstance(obs[0], np.ndarray)
         npt.assert_array_equal(obs[0], self.data)
-        self.assertListEqual(obs[1], self.samples)
-        self.assertListEqual(obs[2], self.features)
+        self.assertListEqual(obs[1].tolist(), self.samples)
+        self.assertListEqual(obs[2].tolist(), self.features)
 
         # no samples / features
         table = pd.DataFrame(self.data)
         obs = _ingest_table(table)
         npt.assert_array_equal(obs[0], self.data)
-        self.assertListEqual(obs[1], list(range(obs[0].shape[0])))
-        self.assertListEqual(obs[2], list(range(obs[0].shape[1])))
+        self.assertListEqual(obs[1].tolist(), list(range(obs[0].shape[0])))
+        self.assertListEqual(obs[2].tolist(), list(range(obs[0].shape[1])))
 
         # override samples / features
         obs = _ingest_table(table, self.samples, self.features)
@@ -76,7 +79,7 @@ class TestIngest(TestCase):
         self.assertIsInstance(obs[0], np.ndarray)
         npt.assert_array_equal(obs[0], self.data)
         self.assertListEqual(obs[1], self.samples)
-        self.assertListEqual(obs[2], self.features)
+        self.assertListEqual(obs[2].names(), self.features)
 
         # no samples, override features
         table = pl.DataFrame(self.data)
@@ -105,8 +108,8 @@ class TestIngest(TestCase):
         obs = _ingest_table(table)
         self.assertIsInstance(obs[0], np.ndarray)
         npt.assert_array_equal(obs[0], self.data)
-        self.assertListEqual(obs[1], self.samples)
-        self.assertListEqual(obs[2], self.features)
+        self.assertListEqual(list(obs[1]), self.samples)
+        self.assertListEqual(list(obs[2]), self.features)
 
     def test_ingest_sequence(self):
         table = self.data.tolist()
@@ -121,13 +124,36 @@ class TestIngest(TestCase):
         obs = _ingest_table(tuple(tuple(x) for x in table))
         npt.assert_array_equal(obs[0], self.data)
 
+    @skipIf(torch is None, "PyTorch is not available for unit tests.")
+    def test_ingest_torch(self):
+        table = torch.tensor(self.data)
+        obs = _ingest_table(table)
+        npt.assert_array_equal(obs[0], self.data)
+        self.assertIsNone(obs[1])
+        self.assertIsNone(obs[2])
+
+    @skipIf(jnp is None, "JAX is not available for unit tests.")
+    def test_ingest_jax(self):
+        table = jnp.asarray(self.data)
+        obs = _ingest_table(table)
+        npt.assert_array_equal(obs[0], self.data)
+        self.assertIsNone(obs[1])
+        self.assertIsNone(obs[2])
+
     def test_ingest_error(self):
-        msg = "Input table format is not supported."
+        msg = "'int' is not a supported table format."
         with self.assertRaises(TypeError) as cm:
             _ingest_table(123)
         self.assertEqual(str(cm.exception), msg)
+
+        msg = "'str' is not a supported table format."
         with self.assertRaises(TypeError) as cm:
             _ingest_table("hello")
+        self.assertEqual(str(cm.exception), msg)
+
+        msg = "'type' is not a supported table format."
+        with self.assertRaises(TypeError) as cm:
+            _ingest_table(TypeError)
         self.assertEqual(str(cm.exception), msg)
 
         msg = "Input table has less than 2 dimensions."
@@ -151,7 +177,7 @@ class TestIngest(TestCase):
 
 class TestPandas(TestCase):
     def setUp(self):
-        set_config("output", "pandas")
+        set_config("table_output", "pandas")
         self.data = [[0, 1, 2], [3, 4, 5], [6, 7, 8]]
         self.data_1d = self.data[0]
         self.index = ["A", "B", "C"]
@@ -212,14 +238,14 @@ class TestPandas(TestCase):
 
 class TestNumpy(TestCase):
     def setUp(self):
-        set_config("output", "numpy")
+        set_config("table_output", "numpy")
         self.data = [[0, 1, 2], [3, 4, 5], [6, 7, 8]]
         self.data_1d = self.data[0]
         self.index = ["A", "B", "C"]
         self.columns = ["f1", "f2", "f3"]
 
     def tearDown(self):
-        set_config("output", "pandas")
+        set_config("table_output", "pandas")
 
     def test_create_table_no_backend(self):
         obs = _create_table(data=self.data, columns=self.columns, index=self.index)
@@ -277,14 +303,14 @@ class TestNumpy(TestCase):
 @skipIf(pl is None, "Polars is not available for unit tests.")
 class TestPolars(TestCase):
     def setUp(self):
-        set_config("output", "polars")
+        set_config("table_output", "polars")
         self.data = [[0, 1, 2], [3, 4, 5], [6, 7, 8]]
         self.data_1d = self.data[0]
         self.index = ["A", "B", "C"]
         self.columns = ["f1", "f2", "f3"]
 
     def tearDown(self):
-        set_config("output", "pandas")
+        set_config("table_output", "pandas")
 
     def test_create_table_no_backend(self):
         obs = _create_table(data=self.data, columns=self.columns, index=self.index)
@@ -391,8 +417,8 @@ class TestAnndata(TestCase):
         tbl = adt.AnnData(self.data, obs=self.samples, var=self.features)
         data, row_ids, col_ids = _ingest_table(tbl)
         npt.assert_array_equal(data, self.data)
-        self.assertEqual(row_ids, list(self.samples.index))
-        self.assertEqual(col_ids, list(self.features.index))
+        self.assertListEqual(list(row_ids), list(self.samples.index))
+        self.assertListEqual(list(col_ids), list(self.features.index))
 
     def test_anndata_input_pass_ids(self):
         tbl = adt.AnnData(self.data, obs=self.samples, var=self.features)
@@ -400,8 +426,8 @@ class TestAnndata(TestCase):
             tbl, sample_ids=list(self.samples.index), feature_ids=list(self.features.index)
         )
         npt.assert_array_equal(data, self.data)
-        self.assertEqual(row_ids, list(self.samples.index))
-        self.assertEqual(col_ids, list(self.features.index))
+        self.assertListEqual(list(row_ids), list(self.samples.index))
+        self.assertListEqual(list(col_ids), list(self.features.index))
 
 
 if __name__ == "__main__":

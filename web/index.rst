@@ -79,6 +79,7 @@
    Community <https://github.com/scikit-bio/scikit-bio/discussions>
    Releases <https://github.com/scikit-bio/scikit-bio/blob/main/CHANGELOG.md>
    About <about>
+   Roadmap <roadmap>
 
 
 .. grid:: 1 1 1 3
@@ -105,15 +106,13 @@
          from skbio.diversity import beta_diversity
          from skbio.stats.ordination import pcoa
 
-         data = pd.read_table('data.tsv', index_col=0)
+         table = pd.read_table('data.tsv', index_col=0)
          metadata = pd.read_table('metadata.tsv', index_col=0)
          tree = TreeNode.read('tree.nwk')
 
-         bdiv = beta_diversity(
-             'weighted_unifrac', data, ids=data.index, otu_ids=data.columns, tree=tree
-         )
+         bdiv = beta_diversity('weighted_unifrac', table, tree=tree)
 
-         ordi = pcoa(bdiv, number_of_dimensions=3)
+         ordi = pcoa(bdiv, dimensions=3)
          ordi.plot(metadata, column='bodysite')
 
       .. image:: _static/img/hmp1_pcoa.png
@@ -159,7 +158,7 @@
 
                    /-chicken
                   |
-         -root----|                    /-rat
+         ---------|                    /-rat
                   |          /--------|
                   |         |          \-mouse
                    \--------|
