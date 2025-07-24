@@ -539,7 +539,7 @@ def _encapsulate_pca_result(
             columns=axis_labels,
             backend=output_format,
         ),
-        features - _create_table(
+        features = _create_table(
             loadings,
             index=feature_ids,
             columns=axis_labels,
@@ -547,7 +547,7 @@ def _encapsulate_pca_result(
         ),
         proportion_explained=_create_table_1d(
             proportion_explained, index=axis_labels, backend=output_format
-        ),
+        )
     )
     
 def _encapsulate_pcoa_result(
