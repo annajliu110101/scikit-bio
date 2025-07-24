@@ -26,27 +26,29 @@ from skbio.binaries import (
 )
 from skbio.util._decorator import params_aliased
 
-def pca(table, 
-        method="svd", 
-        dimensions=0, 
-        inplace=False, 
-        seed=None, 
-        warn_neg_eigval=0.01, 
-        output_format=None,
-       ):
-    '''Perform Principal Coordinate Analysis (PCA).
+
+def pca(
+    table,
+    method="svd",
+    dimensions=0,
+    inplace=False,
+    seed=None,
+    warn_neg_eigval=0.01,
+    output_format=None,
+):
+    """Perform Principal Coordinate Analysis (PCA).
     PCA is an ordination method operating on sample x observation tables,
-    calculated using Euclidean distances. 
+    calculated using Euclidean distances.
 
     The main computational difference with PCoA is that the input table
-    is centered along the columns only, instead of double-centered in 
-    PCoA.  
+    is centered along the columns only, instead of double-centered in
+    PCoA.
 
-    Computing an intermediate matrix using A @ A.T ensures that all 
-    downstreamcomputations are virtually identical to PCoA while computing 
-    the covariance matrix (more likely) means the eigenvectors are in 
+    Computing an intermediate matrix using A @ A.T ensures that all
+    downstreamcomputations are virtually identical to PCoA while computing
+    the covariance matrix (more likely) means the eigenvectors are in
     feature space, which will need to be converted back to sample space
-    when computing the samples/coordinates.  
+    when computing the samples/coordinates.
 
     Parameters
     ----------
@@ -71,8 +73,8 @@ def pca(table,
         See :func:`details <skbio.util.get_rng>`.
     Notes
     -----
-    
-    '''
+
+    """
     feature_table, sample_ids, feature_ids = _ingest_table(table)
 
     if dimensions == 0:
@@ -96,9 +98,7 @@ def pca(table,
             "number of features in the given table?"
         )
     elif dimensions > feature_table.shape[1]:
-        raise ValueError(
-            "Invalid operation: cannot extend past number of features."
-        )
+        raise ValueError("Invalid operation: cannot extend past number of features.")
     elif not isinstance(dimensions, Integral) and dimensions > 1:
         raise ValueError(
             "Invalid operation: A floating-point number greater than 1 cannot be "
@@ -111,22 +111,20 @@ def pca(table,
             "and 1."
         )
 
-    
-    centered_table = scale(feature_table, with_std = False, copy = not inplace)
+    centered_table = scale(feature_table, with_std=False, copy=not inplace)
 
     if method == "eigh":
-
         matrix_data = dot(centered_table.T, centered_table)
         eigvals, eigvecs = eigh(matrix_data)
         long_method_name = f"Principal Component Analysis Using Full Eigendecomposition"
-        
-        eigvals = np.flip(eigvals, axis = 0)
-        eigvecs = np.flip(eigvecs, axis = 1)
-        
+
+        eigvals = np.flip(eigvals, axis=0)
+        eigvecs = np.flip(eigvecs, axis=1)
+
     elif method == "svd":
         matrix_data = centered_table
-        eigvecs, s, V = svd(matrix_data, full_matrices = False)
-        eigvals = (s**2)/(feature_table.shape[1]-1)
+        eigvecs, s, V = svd(matrix_data, full_matrices=False)
+        eigvals = (s**2) / (feature_table.shape[1] - 1)
         long_method_name = f"Principal Component Analysis with SVD"
 
     elif method == "fsvd":
@@ -142,7 +140,7 @@ def pca(table,
             )
             num_dimensions = feature_table.shape[1]
         matrix_data = dot(centered_table.T, centered_table)
-            
+
         eigvals, eigvecs = _fsvd(matrix_data, num_dimensions, seed=seed)
         long_method_name = "Approximate Principal Coordinate Analysis using FSVD"
     else:
@@ -187,7 +185,7 @@ def pca(table,
         sum_eigvals = np.trace(centered_table)
     else:
         sum_eigvals = np.sum(eigvals)
-    
+
     proportion_explained = eigvals / sum_eigvals
 
     if 0 < dimensions < 1:
@@ -197,20 +195,21 @@ def pca(table,
         num_dimensions = (
             np.searchsorted(cumulative_variance, dimensions, side="left") + 1
         )
-        
+
         dimensions = num_dimensions
-    
+
     eigvecs = eigvecs[:, :dimensions]
     eigvals = eigvals[:dimensions]
     proportion_explained = proportion_explained[:dimensions]
-    
-    if (method == "fsvd" or method == "eigh"):
+
+    if method == "fsvd" or method == "eigh":
         coordinates = dot(centered_table, eigvecs)
         loadings = eigvecs
     else:
-        loadings = V[:, :dimensions].T
-        coordinates = eigvecs * np.sqrt(eigvals * (feature_table.shape[1]-1))
-        
+        loadings = V[:dimensions, :].T
+        print(loadings.shape)
+        coordinates = eigvecs * np.sqrt(eigvals * (feature_table.shape[1] - 1))
+
     return _encapsulate_pca_result(
         long_method_name,
         eigvals,
@@ -221,6 +220,7 @@ def pca(table,
         feature_ids,
         output_format,
     )
+
 
 @params_aliased(
     [
@@ -518,8 +518,16 @@ def pcoa(
         output_format,
     )
 
+
 def _encapsulate_pca_result(
-    long_method_name, eigvals, coordinates, loadings, proportion_explained, sample_ids, feature_ids, output_format
+    long_method_name,
+    eigvals,
+    coordinates,
+    loadings,
+    proportion_explained,
+    sample_ids,
+    feature_ids,
+    output_format,
 ):
     dimensions = eigvals.shape[0]
     axis_labels = ["PC%d" % i for i in range(1, dimensions + 1)]
@@ -533,7 +541,7 @@ def _encapsulate_pca_result(
             columns=axis_labels,
             backend=output_format,
         ),
-        features = _create_table(
+        features=_create_table(
             loadings,
             index=feature_ids,
             columns=axis_labels,
@@ -541,9 +549,10 @@ def _encapsulate_pca_result(
         ),
         proportion_explained=_create_table_1d(
             proportion_explained, index=axis_labels, backend=output_format
-        )
+        ),
     )
-    
+
+
 def _encapsulate_pcoa_result(
     long_method_name, eigvals, coordinates, proportion_explained, ids, output_format
 ):
