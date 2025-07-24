@@ -17,7 +17,7 @@ from scipy.linalg import eigh
 
 from skbio.util import get_rng
 from skbio.stats.distance import DistanceMatrix
-from skbio.table._tabular import _create_table, _create_table_1d
+from skbio.table._tabular import _create_table, _create_table_1d, _ingest_table
 from ._ordination_results import OrdinationResults
 from ._utils import center_distance_matrix, scale
 from skbio.binaries import (
@@ -26,12 +26,6 @@ from skbio.binaries import (
 )
 from skbio.util._decorator import params_aliased
 
-@params_aliased(
-    [
-        ("dimensions", "number_of_dimensions", "0.7.0", False),
-        ("distmat", "distance_matrix", "0.7.0", False),
-    ]
-)
 def pca(table, 
         method="svd", 
         dimensions=0, 
@@ -130,7 +124,7 @@ def pca(table,
         eigvecs = np.flip(eigvecs, axis = 1)
         
     elif method == "svd":
-        matrix_data = centered_data
+        matrix_data = centered_table
         eigvecs, s, V = svd(matrix_data, full_matrices = False)
         eigvals = (s**2)/(feature_table.shape[1]-1)
         long_method_name = f"Principal Component Analysis with SVD"
