@@ -31,7 +31,8 @@ from skbio.util._decorator import params_aliased
         ("dimensions", "number_of_dimensions", "0.7.0", False),
         ("distmat", "distance_matrix", "0.7.0", False),
     ]
-)def pca(table, 
+)
+def pca(table, 
         method="svd", 
         dimensions=0, 
         inplace=False, 
