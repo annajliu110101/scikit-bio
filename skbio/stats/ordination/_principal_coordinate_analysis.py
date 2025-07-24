@@ -26,6 +26,210 @@ from skbio.binaries import (
 )
 from skbio.util._decorator import params_aliased
 
+@params_aliased(
+    [
+        ("dimensions", "number_of_dimensions", "0.7.0", False),
+        ("distmat", "distance_matrix", "0.7.0", False),
+    ]
+)def pca(table, 
+        method="svd", 
+        dimensions=0, 
+        inplace=False, 
+        seed=None, 
+        warn_neg_eigval=0.01, 
+        output_format=None,
+       ):
+    '''Perform Principal Coordinate Analysis (PCA).
+    PCA is an ordination method operating on sample x observation tables,
+    calculated using Euclidean distances. 
+
+    The main computational difference with PCoA is that the input table
+    is centered along the columns only, instead of double-centered in 
+    PCoA.  
+
+    Computing an intermediate matrix using A @ A.T ensures that all 
+    downstreamcomputations are virtually identical to PCoA while computing 
+    the covariance matrix (more likely) means the eigenvectors are in 
+    feature space, which will need to be converted back to sample space
+    when computing the samples/coordinates.  
+
+    Parameters
+    ----------
+    table : Table-like object
+        The input sample x feature table.
+    method : str, optional
+        Matrix decomposition method to use. Default is "svd".
+        which computes exact eigenvectors and eigenvalues for all dimensions. The
+        alternate is "fsvd" (fast singular value decomposition), a heuristic that can
+        compute only a given number of dimensions.
+    number_of_dimensions : int or float, optional
+        Dimensions to reduce the distance matrix to. This number determines how many
+        eigenvectors and eigenvalues will be returned. If an integer is provided, the
+        exact number of dimensions will be retained. If a float between 0 and 1, it
+        represents the fractional cumulative variance to be retained. Default is 0,
+        which will retain the same number of dimensions as the feature table.
+    inplace : bool, optional
+        If True, the input table will be centered in-place to reduce memory
+        consumption, at the cost of losing the original observations. Default is False.
+    seed : int or np.random.Generator, optional
+        A user-provided random seed or random generator instance for method "fsvd".
+        See :func:`details <skbio.util.get_rng>`.
+    Notes
+    -----
+    
+    '''
+    feature_table, sample_ids, feature_ids = _ingest_table(feature_table)
+    
+    m, n = feature_table.shape
+
+    if dimensions == 0:
+        if method == "fsvd" and n > 10:
+            warn(
+                "FSVD: since no value for number_of_dimensions is specified, "
+                "PCoA for all dimensions will be computed, which may "
+                "result in long computation time if the original "
+                "feature table is large and/or if number of features"
+                "is similar or larger than the number of samples",
+                RuntimeWarning,
+            )
+
+        dimensions = n
+    elif dimensions < 0:
+        raise ValueError(
+            "Invalid operation: cannot reduce table "
+            "to negative dimensions using PCA. Did you intend "
+            'to specify the default value "0", which sets '
+            "the number_of_dimensions equal to the "
+            "number of features in the given table?"
+        )
+    elif dimensions > n:
+        raise ValueError(
+            "Invalid operation: cannot extend past number of features."
+        )
+    elif not isinstance(dimensions, Integral) and dimensions > 1:
+        raise ValueError(
+            "Invalid operation: A floating-point number greater than 1 cannot be "
+            "supplied as the number of dimensions."
+        )
+
+    if warn_neg_eigval and not 0 <= warn_neg_eigval <= 1:
+        raise ValueError(
+            "warn_neg_eigval must be Boolean or a floating-point number between 0 "
+            "and 1."
+        )
+
+    
+    centered_table = scale(feature_table, with_std = False, copy = not inplace)
+
+    if method == "eigh":
+
+        matrix_data = dot(centered_table.T, centered_table)
+        
+        eigvals, eigvecs = eigh(matrix_data)
+        long_method_name = f"Principal Component Analysis Using Full Eigendecomposition"
+        
+        eigvals = np.flip(eigvals, axis = 0)
+        eigvecs = np.flip(eigvecs, axis = 1)
+        
+    elif method == "svd":
+        matrix_data = centered_data
+        eigvecs, s, V = svd(matrix_data, full_matrices = False)
+        eigvals = (s**2)/(n-1)
+        long_method_name = f"Principal Component Analysis with SVD"
+
+    elif method == "fsvd":
+        num_dimensions = dimensions
+        if 0 < dimensions < 1:
+            warn(
+                "FSVD: since value for number_of_dimensions is specified as float, "
+                "PCoA for all dimensions will be computed, which may "
+                "result in long computation time if the original "
+                "distance matrix is large. "
+                "Consider specifying an integer value to optimize performance.",
+                RuntimeWarning,
+            )
+            num_dimensions = n
+        matrix_data = dot(centered_table.T, centered_table)
+            
+        eigvals, eigvecs = _fsvd(matrix_data, num_dimensions, seed=seed)
+        long_method_name = "Approximate Principal Coordinate Analysis using FSVD"
+    else:
+        raise ValueError(
+            "PCoA eigendecomposition method {} not supported.".format(method)
+        )
+
+    # Ensure number_of_dimensions does not exceed available dimensions
+    # dimensions = min(dimensions, eigvals.shape[0])
+
+    # cogent makes eigenvalues positive by taking the
+    # abs value, but that doesn't seem to be an approach accepted
+    # by L&L to deal with negative eigenvalues. We raise a warning
+    # in that case. First, we make values close to 0 equal to 0.
+    negative_close_to_zero = np.isclose(eigvals, 0)
+    eigvals[negative_close_to_zero] = 0
+
+    # large negative eigenvalues suggest result inaccuracy
+    # see: https://github.com/scikit-bio/scikit-bio/issues/1410
+    if warn_neg_eigval and eigvals[-1] < 0:
+        if warn_neg_eigval is True or -eigvals[-1] > eigvals[0] * warn_neg_eigval:
+            warn(
+                "The result contains negative eigenvalues that are large in magnitude,"
+                " which may suggest result inaccuracy. See Notes for details. The"
+                " negative-most eigenvalue is {0} whereas the largest positive one is"
+                " {1}.".format(eigvals[-1], eigvals[0]),
+                RuntimeWarning,
+            )
+
+    if method == "fsvd":
+        # Since the dimension parameter, hereafter referred to as 'd',
+        # restricts the number of eigenvalues and eigenvectors that FSVD
+        # computes, we need to use an alternative method to compute the sum
+        # of all eigenvalues, used to compute the array of proportions
+        # explained. Otherwise, the proportions calculated will only be
+        # relative to d number of dimensions computed; whereas we want
+        # it to be relative to the number of features in the input table.
+
+        # An alternative method of calculating th sum of eigenvalues is by
+        # computing the trace of the centered feature table.
+        # See proof outlined here: https://goo.gl/VAYiXx
+        sum_eigvals = np.trace(centered_table)
+    else:
+        sum_eigvals = np.sum(eigvals)
+    
+    proportion_explained = eigvals / sum_eigvals
+
+    if 0 < dimensions < 1:
+        # gives the number of dimensions needed to reach specified variance
+        # updates number of dimensions to reach the requirement of variance.
+        cumulative_variance = np.cumsum(proportion_explained)
+        num_dimensions = (
+            np.searchsorted(cumulative_variance, dimensions, side="left") + 1
+        )
+        
+        dimensions = num_dimensions
+    
+    eigvecs = eigvecs[:, :dimensions]
+    eigvals = eigvals[:dimensions]
+    proportion_explained = proportion_explained[:dimensions]
+    
+    if (method == "fsvd" or method == "eigh"):
+        coordinates = dot(centered_table, eigvecs)
+        loadings = eigvecs
+    else:
+        loadings = V[:, :dimensions].T
+        eigvecs *= np.sqrt(eigvals * (n-1))
+        coordinates = eigvecs
+        
+    return _encapsulate_pca_result(
+        long_method_name,
+        eigvals,
+        coordinates,
+        loadings,
+        proportion_explained,
+        sample_ids,
+        feature_ids,
+        output_format,
+    )
 
 @params_aliased(
     [
@@ -323,7 +527,32 @@ def pcoa(
         output_format,
     )
 
-
+def _encapsulate_pca_result(
+    long_method_name, eigvals, coordinates, loadings, proportion_explained, sample_ids, feature_ids, output_format
+):
+    dimensions = eigvals.shape[0]
+    axis_labels = ["PC%d" % i for i in range(1, dimensions + 1)]
+    return OrdinationResults(
+        short_method_name="PCA",
+        long_method_name=long_method_name,
+        eigvals=_create_table_1d(eigvals, index=axis_labels, backend=output_format),
+        samples=_create_table(
+            coordinates,
+            index=sample_ids,
+            columns=axis_labels,
+            backend=output_format,
+        ),
+        features - _create_table(
+            loadings,
+            index=feature_ids,
+            columns=axis_labels,
+            backend=output_format,
+        ),
+        proportion_explained=_create_table_1d(
+            proportion_explained, index=axis_labels, backend=output_format
+        ),
+    )
+    
 def _encapsulate_pcoa_result(
     long_method_name, eigvals, coordinates, proportion_explained, ids, output_format
 ):
