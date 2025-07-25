@@ -76,9 +76,10 @@ def pca(
 
     """
     feature_table, sample_ids, feature_ids = _ingest_table(table)
+    n_samples, n_features = feature_table.shape
 
     if dimensions == 0:
-        if method == "fsvd" and feature_table.shape[1] > 10:
+        if method == "fsvd" and n_features > 10:
             warn(
                 "FSVD: since no value for number_of_dimensions is specified, "
                 "PCoA for all dimensions will be computed, which may "
@@ -88,7 +89,7 @@ def pca(
                 RuntimeWarning,
             )
 
-        dimensions = feature_table.shape[1]
+        dimensions = n_features
     elif dimensions < 0:
         raise ValueError(
             "Invalid operation: cannot reduce table "
@@ -97,7 +98,7 @@ def pca(
             "the number_of_dimensions equal to the "
             "number of features in the given table?"
         )
-    elif dimensions > feature_table.shape[1]:
+    elif dimensions > n_features:
         raise ValueError("Invalid operation: cannot extend past number of features.")
     elif not isinstance(dimensions, Integral) and dimensions > 1:
         raise ValueError(
@@ -111,20 +112,23 @@ def pca(
             "and 1."
         )
 
-    centered_table = scale(feature_table, with_std=False, copy=not inplace)
+    centered_table = scale(feature_table, with_std=False)
 
     if method == "eigh":
-        matrix_data = dot(centered_table.T, centered_table)
+        if n_samples < n_features:
+            matrix_data = dot(centered_table, centered_table.T)
+        else:
+            matrix_data = dot(centered_table.T, centered_table)
         eigvals, eigvecs = eigh(matrix_data)
         long_method_name = f"Principal Component Analysis Using Full Eigendecomposition"
-
+        # Eigh returns values in reverse order
         eigvals = np.flip(eigvals, axis=0)
         eigvecs = np.flip(eigvecs, axis=1)
 
     elif method == "svd":
         matrix_data = centered_table
-        eigvecs, s, V = svd(matrix_data, full_matrices=False)
-        eigvals = (s**2) / (feature_table.shape[1] - 1)
+        eigvecs, eigvals, Vt = svd(matrix_data, full_matrices=False)
+        V = Vt.T
         long_method_name = f"Principal Component Analysis with SVD"
 
     elif method == "fsvd":
@@ -138,8 +142,11 @@ def pca(
                 "Consider specifying an integer value to optimize performance.",
                 RuntimeWarning,
             )
-            num_dimensions = feature_table.shape[1]
-        matrix_data = dot(centered_table.T, centered_table)
+            num_dimensions = n_features
+        if n_samples < n_features:
+            matrix_data = dot(centered_table, centered_table.T)
+        else:
+            matrix_data = dot(centered_table.T, centered_table)
 
         eigvals, eigvecs = _fsvd(matrix_data, num_dimensions, seed=seed)
         long_method_name = "Approximate Principal Coordinate Analysis using FSVD"
@@ -202,13 +209,18 @@ def pca(
     eigvals = eigvals[:dimensions]
     proportion_explained = proportion_explained[:dimensions]
 
-    if method == "fsvd" or method == "eigh":
-        coordinates = dot(centered_table, eigvecs)
-        loadings = eigvecs
+    if method in ("eigh", "fsvd"):
+        if n_samples < n_features:
+            loadings = dot(centered_table.T, eigvecs)
+            coordinates = eigvecs * np.sqrt(eigvals)
+        else:
+            coordinates = dot(centered_table, eigvecs)
+            loadings = eigvecs
+        eigvals /= n_samples - 1
     else:
-        loadings = V[:dimensions, :].T
-        print(loadings.shape)
-        coordinates = eigvecs * np.sqrt(eigvals * (feature_table.shape[1] - 1))
+        coordinates = eigvecs * eigvals
+        loadings = V[:, :dimensions]
+        eigvals = (eigvals**2) / (n_samples - 1)
 
     return _encapsulate_pca_result(
         long_method_name,
