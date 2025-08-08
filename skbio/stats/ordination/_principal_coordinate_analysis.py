@@ -184,7 +184,7 @@ def pca(table,
         # An alternative method of calculating th sum of eigenvalues is by
         # computing the trace of the centered feature table.
         # See proof outlined here: https://goo.gl/VAYiXx
-        sum_eigvals = np.trace(centered_table)
+        sum_eigvals = np.trace(matrix_data)
     else:
         sum_eigvals = np.sum(eigvals)
     
