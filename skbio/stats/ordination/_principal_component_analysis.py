@@ -84,7 +84,7 @@ def pca(
     """
 
     feature_table, sample_ids, feature_ids = _ingest_table(table)
-  
+
     if dimensions == 0:
         if method == "fsvd" and min(feature_table.shape) > 10:
             warn(
@@ -209,7 +209,7 @@ def pca(
     # In PCA, it is assumed that the metric used is euclidean.  Therefore
     # theoretically, there should not be any negative eigenvalues.  However,
     # eigh is known to have small rounding errors that may introduce small
-    # negatives, so we set them equal to zero here.  
+    # negatives, so we set them equal to zero here.
     negative_close_to_zero = np.isclose(eigvals, 0.0) & (eigvals < 0)
     eigvals[negative_close_to_zero] = 0.0
 
@@ -267,7 +267,8 @@ def pca(
     # by dividing by the singular-values.
     # X = U*S*Vᵗ -> Xᵗ*U = V*S -> V = Xᵗ*U*S⁻¹ = features
     if V is None:
-        V = dot(centered_table, U) * np.maximum(np.power(eigvals, -0.5, where = eigvals > 0), 0)[np.newaxis, :]
+        V = dot(centered_table, U)
+        V *= np.maximum(np.power(eigvals, -0.5, where = eigvals > 0), 0)[np.newaxis, :]
     features = V
 
     # The embeddings in sample space are equivalent to the projection
@@ -282,7 +283,6 @@ def pca(
         # U*S = coordinates
         U *= np.maximum(np.power(eigvals, 0.5, where = eigvals > 0), 0)
     samples = U
-    
     eigvals /= (feature_table.shape[0] - 1)
 
     return _encapsulate_pca_result(
@@ -320,7 +320,6 @@ def normalize_signs(u, v, u_based_decision=True):
         v *= signs[:, np.newaxis]
     return u, v
 
-  
 def _encapsulate_pca_result(
     long_method_name,
     eigvals,
