@@ -10,14 +10,13 @@ from numbers import Integral
 from warnings import warn
 
 import numpy as np
-import pandas as pd
 from numpy import dot
 from numpy.linalg import svd
 from scipy.linalg import eigh
 
 from skbio.table._tabular import _create_table, _create_table_1d, _ingest_table
 from ._ordination_results import OrdinationResults
-from ._utils import scale, center_matrix
+from ._utils import scale
 from skbio.binaries import (
     pcoa_fsvd_available as _skbb_pcoa_fsvd_available,
     pcoa_fsvd as _skbb_pcoa_fsvd,
@@ -161,8 +160,8 @@ def pca(
             # to maintain homogenity with downstream post-processing
             # with the other methods.  Additionally, ensures efficient
             # memory access for svd_flip
-            eigvals = np.ascontiguousarray(eigvals[::-1])
-            eigvecs = np.asfortranarray(eigvecs[:, ::-1])
+            eigvals = np.flip(eigvals, axis = 0)
+            eigvecs = np.flip(eigvecs, axis = 1)
 
         elif method == "fsvd":
             num_dimensions = dimensions
@@ -177,7 +176,8 @@ def pca(
                 )
                 num_dimensions = min(feature_table.shape)
             eigvals, eigvecs = _fsvd(
-                matrix_data, num_dimensions, seed=seed)
+                matrix_data, num_dimensions, seed=seed,
+            )
             long_method_name = (
                 "Approximate Principal Coordinate Analysis using FSVD"
             )
@@ -186,15 +186,15 @@ def pca(
                 "PCA eigendecomposition method {} not supported.".format(method)
             )
 
-            # Since an intermediate matrix was computed,
-            # the eigenvectors produced are either in
-            # sample space or in feature space.  Since
-            # svd_flip expects Vt, not V, eigenvectors
-            # are transposed.
-            if feature_table.shape[0] <= feature_table.shape[1]:
-                U, Vt = eigvecs, None
-            else:
-                U, Vt = None, eigvecs.T
+        # Since an intermediate matrix was computed,
+        # the eigenvectors produced are either in
+        # sample space or in feature space.  Since
+        # svd_flip expects Vt, not V, eigenvectors
+        # are transposed.
+        if feature_table.shape[0] <= feature_table.shape[1]:
+            U, Vt = eigvecs, None
+        else:
+            U, Vt = None, eigvecs.T
 
     # If U exists, its columns are used to determine the sign.
     # The signs of all the values are with respect to the largest
@@ -280,9 +280,10 @@ def pca(
         U = dot(centered_table, V)
     else:
         # U*S = coordinates
-        U *= np.maximum(np.power(eigvals, 0.5, where = eigvals > 0))
+        U *= np.maximum(np.power(eigvals, 0.5, where = eigvals > 0), 0)
     samples = U
-    eigvals /= feature_table.shape[0] - 1
+    
+    eigvals /= (feature_table.shape[0] - 1)
 
     return _encapsulate_pca_result(
         long_method_name,
