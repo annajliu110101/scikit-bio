@@ -11,10 +11,6 @@ from skbio.stats.ordination._principal_component_analysis import pca
 from skbio.util import (get_data_path, assert_ordination_results_equal,
                         assert_data_frame_almost_equal)
 
-import time
-import inspect
-from functools import wraps
-
 class TestPCA(TestCase):
     def setUp(self):
         self.data = pd.read_csv(get_data_path("PCA_example1_input.csv"), index_col = 0)
@@ -48,14 +44,13 @@ class TestPCA(TestCase):
         assert_ordination_results_equal(results, expected_results,
                                         ignore_method_names=True,
                                         )
-    def test_self(self):
+    def test_svd_self(self):
         results = self.pca_results(self.data, method = "svd", dimensions = 50)
         expected_results = pca(self.data, method = "svd", dimensions = 50)
         assert_ordination_results_equal(results, expected_results,
                                         ignore_method_names=True,
-        )
+                                        )
     
-
     def test_fsvd_self(self):
         results = self.pca_results(self.data, method = "fsvd", dimensions = 50)
         expected_results = self.pca_results(self.data, method = "fsvd", dimensions = 50)
@@ -70,16 +65,15 @@ class TestPCA(TestCase):
                                         ) 
 
     def test_eigh(self):
-        results = self.pca_results(self.data.copy(), method = "eigh", dimensions = 50)
-        expected_results = self.sklearn_results(self.data, svd_solver = "covariance_eigh", n_components = 50)
-
+        results = self.pca_results(self.data, method = "eigh", dimensions = 50)
+        expected_results = pca(self.data, method = "svd", dimensions = 50)
         assert_ordination_results_equal(results, expected_results,
                                         ignore_method_names=True,
                                         )
 
     def test_eigh_transposed(self):
         results = self.pca_results(self.transposed_data, method = "eigh", dimensions = 50)
-        expected_results = self.sklearn_results(self.transposed_data, svd_solver = "covariance_eigh", n_components = 50)
+        expected_results = pca(self.transposed_data, method = "svd", dimensions = 50)
         assert_ordination_results_equal(results, expected_results,
                                         ignore_method_names=True,
                                         )
