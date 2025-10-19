@@ -8,10 +8,12 @@
 
 from numbers import Integral
 from warnings import warn
+import math
 
 import numpy as np
 from numpy.linalg import svd
 from scipy.linalg import eigh
+from sklearn.decomposition import TruncatedSVD
 
 from skbio.table._tabular import _create_table, _create_table_1d, _ingest_table
 from ._ordination_results import OrdinationResults
@@ -80,26 +82,25 @@ def pca(
         )
 
     n_samples, n_features = feature_table.shape
+    in_sample_space = n_samples <= n_features
+    ndim = rank_max
 
     if method == "svd":
         feature_table = scale(feature_table, with_std=False, copy=not inplace)
 
         # SVD returns FORTRAN-ordered U, S, Vt
         U, S, Vt = svd(feature_table, full_matrices=False)
-        loadings = Vt.T
+        V = Vt.T
         long_method_name = f"Principal Component Analysis with SVD"
 
         # Compute eigenvalues now to unify post-processing
         # downstream.  If eigenvalues were left as singular
         # values, the proportions explained would be incorrect.
         eigvals = S**2
-        sum_eigvals = np.sum(eigvals)
-
     else:
-        in_sample_space = n_samples <= n_features
         ndim = dimensions
         if 0 < dimensions < 1:
-            ndim = np.ceil(rank_max * dimensions).astype(int)
+            ndim = math.ceil(rank_max * dimensions)
             if ndim > 10:
                 warn(
                     f"{method.upper()}: since value for number_of_dimensions"
@@ -126,6 +127,7 @@ def pca(
             # means we do not need to center the output when project
             matrix_data = feature_table @ feature_table.T
             matrix_data = _f_matrix_inplace(matrix_data)
+            feature_table = feature_table.T
         else:
             # The feature table and the mean are both in feature space so the
             # outer product works  to center the columns of the intermediate
@@ -134,10 +136,14 @@ def pca(
             # still need to be centered.
             mean = feature_table.mean(axis=0)
             matrix_data = feature_table.T @ feature_table
-            matrix_data -= n_samples * (mean[:, None] @ mean[None, :])
+            matrix_data -= n_samples * mean[:, None] * mean[None, :]
 
         if method == "eigh":
-            subidx = [rank_max - ndim, rank_max]
+            if ndim >= 0.3 * rank_max:
+                ndim = rank_max
+                subidx = None
+            else:
+                subidx = [rank_max - ndim, rank_max - 1]
 
             eigvals, eigvecs = eigh(matrix_data, subset_by_index=subidx)
             long_method_name = (
@@ -149,8 +155,7 @@ def pca(
             # However, as this is the only method that does not guard against negative
             # numbers, and because the kernel trick squares the condition number, we
             # clip large negative numbers that may arise due to numerical instability.
-            negative_num = np.argmax(eigvals > 0)
-            eigvals[:negative_num] = 0.0
+            eigvals[eigvals < 0] = 0.0
 
             eigvals = np.flip(eigvals)
             eigvecs = np.flip(eigvecs, axis=1)
@@ -159,7 +164,7 @@ def pca(
             # Note that because the intermediate matrix was computed
             # the condition number is effectively squared.  This method
             # should be treated similarly to a randomized svd method,
-            # in that there likely exists numerical instabilities.  
+            # in that there likely exists numerical instabilities.
             # Consider using eigh with subset_by_index
             eigvals, eigvecs = _fsvd(
                 matrix_data,
@@ -174,26 +179,20 @@ def pca(
         # Prepare placeholders for U or V and compute S for unified downstream post
         # processing
         S = np.sqrt(eigvals)
-        eigvecs_projected = np.empty(max(n_samples, n_features))
+        eigvecs_projected = np.empty((max(n_samples, n_features), 0))
 
         if in_sample_space:
             # If intrmediate matrix computed is in sample space (A @ A.T),
             # then eigvecs are in sample space (U from SVD).  Otherwise
             # they correspond to V from SVD.
-            U, loadings = eigvecs, eigvecs_projected
+            U, V = eigvecs, eigvecs_projected
         else:
-            U, loadings = eigvecs_projected, eigvecs
+            U, V = eigvecs_projected, eigvecs
 
-    # cogent makes eigenvalues positive by taking the
-    # abs value, but that doesn't seem to be an approach accepted
-    # by L&L to deal with negative eigenvalues. We raise a warning
-    # in that case. First, we make values close to 0 equal to 0.
-    close_to_zero = np.isclose(eigvals, 0.0)
-    eigvals[close_to_zero] = 0.0
+    # Normalize signs for consistency
+    U, V = normalize_signs(U, V)
 
-    if eigvals.shape[0] >= rank_max or eigvals[-1] == 0:
-        # All possible positive eigenvalues have been computed
-        # hence sum them directly
+    if ndim == rank_max or eigvals[-1] == 0:
         sum_eigvals = np.sum(eigvals)
     else:
         # Since the dimension parameter, hereafter referred to as 'd',
@@ -223,26 +222,21 @@ def pca(
 
     eigvals = eigvals[:dimensions]
     proportion_explained = proportion_explained[:dimensions]
-    U = U[:, :dimensions]
-    S = S[:dimensions]
-    loadings = loadings[:, :dimensions]
 
-    U = np.asarray(U)
-    loadings = np.asarray(loadings)
-
-    # Normalize signs for consistency
-    U, loadings = normalize_signs(U, loadings)
+    # Release extra memory to cache to speed up back-projection
+    U = np.asarray(U[:, :dimensions], copy=True)
+    S = np.asarray(S[:dimensions], copy=True)
+    V = np.asarray(V[:, :dimensions], copy=True)
 
     # U and V are guaranteed to be invertible
     # X = U*S*Vᵗ -> Xᵗ*U = V*S -> V = Xᵗ*U*S⁻¹ = features
-    if loadings.size == 0:
-        loadings = feature_table @ U
-        loadings -= mean @ U
-        loadings /= S[np.newaxis, :]
-
+    if V.size == 0:
+        V = feature_table @ U
+        V /= S[np.newaxis, :]
     # X = U*S*Vᵗ -> XV = U*S = coordinates
     if U.size == 0:
-        U = feature_table @ loadings
+        U = feature_table @ V
+        U -= mean @ V
     else:
         U *= S
 
@@ -252,7 +246,7 @@ def pca(
         long_method_name,
         eigvals,
         U,
-        loadings,
+        V,
         proportion_explained,
         sample_ids,
         feature_ids,
@@ -262,26 +256,29 @@ def pca(
 
 def normalize_signs(u, v):
     # to keep the signs consistent (for plotting purposes)
-    if u.size != 0:
-        # columns of u, rows of v
+    if u.size != 0 and v.size != 0:
+        # columns of u, rows of v_t (columns of v)
         # take maximum absolute value in each column of u (out = row vector)
         # do not transpose to keep Fortran orderedness (efficiency) since
         # accessing columns is faster when matrix is in Fortran order
         max_abs_u_cols = np.argmax(np.abs(u), axis=0)
         shift = np.arange(u.shape[1])
         indices = max_abs_u_cols + shift * u.shape[0]
-        signs = np.sign(np.take(np.reshape(u, (-1,)), indices, axis=1))
+        signs = np.sign(np.take(np.reshape(u, (-1,)), indices, axis=0))
         u *= signs[np.newaxis, :]
-        if v.size != 0:
-            v *= signs[:, np.newaxis]
+        v *= signs[np.newaxis, :]
+    elif u.size != 0:
+        max_abs_u_cols = np.argmax(np.abs(u), axis=0)
+        shift = np.arange(u.shape[1])
+        signs = np.sign(u[max_abs_u_cols, shift])
+        u *= signs
     elif v.size != 0:
-        # columns of v (transposed fortran-ordered), or rows of v_T
         # this route won't ever be taken with SVD, only if intermediate
         # is computed in feature space (A.T @ A) using eigh or fsvd
         max_abs_v_cols = np.argmax(np.abs(v), axis=0)
-        indices = [max_abs_v_cols, np.arange(v.shape[1])]
-        signs = np.sign(indices)
-        v *= signs[:, np.newaxis]
+        indices = np.arange(v.shape[1])
+        signs = np.sign(v[max_abs_v_cols, indices])
+        v *= signs
     return u, v
 
 
