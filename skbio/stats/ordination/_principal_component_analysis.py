@@ -18,10 +18,6 @@ from sklearn.decomposition import TruncatedSVD
 from skbio.table._tabular import _create_table, _create_table_1d, _ingest_table
 from ._ordination_results import OrdinationResults
 from ._utils import scale, _f_matrix_inplace
-from skbio.binaries import (
-    pcoa_fsvd_available as _skbb_pcoa_fsvd_available,
-    pcoa_fsvd as _skbb_pcoa_fsvd,
-)
 from ._principal_coordinate_analysis import _fsvd
 
 
