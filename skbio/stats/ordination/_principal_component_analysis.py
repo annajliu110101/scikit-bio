@@ -18,6 +18,10 @@ from sklearn.decomposition import TruncatedSVD
 from skbio.table._tabular import _create_table, _create_table_1d, _ingest_table
 from ._ordination_results import OrdinationResults
 from ._utils import scale, _f_matrix_inplace
+from skbio.binaries import (
+    pcoa_fsvd_available as _skbb_pcoa_fsvd_available,
+    pcoa_fsvd as _skbb_pcoa_fsvd,
+)
 from ._principal_coordinate_analysis import _fsvd
 
 
@@ -27,6 +31,7 @@ def pca(
     dimensions=0,
     inplace=False,
     seed=None,
+    warn_neg_eigval=0.01,
     output_format=None,
 ):
     r"""Perform Principal Component Analysis (PCA).
@@ -67,6 +72,12 @@ def pca(
     seed : int or np.random.Generator, optional
         A user-provided random seed or random generator instance for method "fsvd".
         See :func:`details <skbio.util.get_rng>`.
+    warn_neg_eigval : bool or float, optional
+        Raise a warning if any negative eigenvalue is obtained. Should only occur
+        due to numerical precision issues. If a float between 0 and 1, warns if
+        the magnitude of the negative eigenvalue exceeds this fraction relative to
+        the sum of all eigenvalues. Default is 0.01. Set True to warn for any
+        negative eigenvalue. Set False to disable warning.
     output_format : optional
         Standard table parameters. See :ref:`table_params` for details.
 
@@ -287,8 +298,7 @@ def pca(
                 f"Principal Component Analysis Using Full Eigendecomposition"
             )
 
-            signs = deterministic_signs(eigvecs)
-            eigvecs *= signs
+            eigvecs = deterministic_signs(eigvecs)
 
             eigvals = np.flip(eigvals)
             eigvecs = np.flip(eigvecs, axis=1)
@@ -313,8 +323,7 @@ def pca(
             )
             long_method_name = "Approximate Principal Component Analysis using FSVD"
 
-            signs = deterministic_signs(eigvecs)
-            eigvecs *= signs
+            eigvecs = deterministic_signs(eigvecs)
         else:
             raise ValueError(
                 "PCA eigendecomposition method {} not supported.".format(method)
@@ -396,6 +405,48 @@ def pca(
 
 
 def normalize_signs(u, v, in_sample_space=True):
+    """Normalize signs of singular vectors for deterministic output.
+
+    This function ensures that the signs of singular vectors U and V are
+    consistent across different runs by normalizing them such that the
+    element with the largest absolute value in each column is positive.
+    This is important for reproducibility and visualization purposes, as
+    singular vectors are only defined up to a sign change.
+
+    Parameters
+    ----------
+    u : ndarray
+        Left singular vectors (n_samples, n_components). Typically the U
+        matrix from SVD decomposition.
+    v : ndarray
+        Right singular vectors (n_features, n_components). Typically the V
+        matrix from SVD decomposition (not V^T).
+    in_sample_space : bool, optional
+        If True, uses u for determining signs (when computation is in sample
+        space). If False, uses v for determining signs (when computation is
+        in feature space). Default is True.
+
+    Returns
+    -------
+    u : ndarray
+        Sign-normalized left singular vectors with the same shape as input.
+    v : ndarray
+        Sign-normalized right singular vectors with the same shape as input.
+
+    Notes
+    -----
+    SVD decomposition returns singular vectors that are unique up to sign.
+    This means that for any valid decomposition X = U * S * V^T, the
+    decomposition X = (-U) * S * (-V)^T is equally valid. This function
+    enforces a consistent sign convention by ensuring that the largest
+    magnitude element in each column is positive.
+
+    The function is optimized for memory layout: SVD typically returns U
+    in C-contiguous order and V in Fortran-contiguous order. When
+    in_sample_space is False, the function uses V for sign determination
+    since accessing its columns is faster due to Fortran ordering.
+
+    """
     # to keep the signs consistent (for plotting purposes)
 
     # SVD (for some reason) returns U, V such that U is C-ordered
@@ -421,9 +472,52 @@ def normalize_signs(u, v, in_sample_space=True):
 
 
 def deterministic_signs(u):
+    """Compute deterministic sign vector for eigenvectors.
+
+    Calculates a sign vector to normalize eigenvector signs by ensuring that
+    the element with the largest absolute value in each column is positive.
+    This provides a consistent sign convention across different runs for
+    eigenvectors, which are only defined up to a sign change.
+
+    Parameters
+    ----------
+    u : ndarray
+        Eigenvector matrix of shape (n, n_components) where each column is an
+        eigenvector.
+
+    Returns
+    -------
+    u : ndarray
+        input array with signs such that the largest magnitude element is positive.
+
+    Notes
+    -----
+    Eigenvectors from eigendecomposition are only defined up to a sign change,
+    meaning both v and -v are valid eigenvectors for the same eigenvalue. This
+    function establishes a deterministic sign convention to ensure reproducibility
+    and consistency in results across different runs or implementations.
+
+    The function finds the index of the maximum absolute value in each column,
+    then returns the sign of that element. Multiplying each column by its
+    corresponding sign ensures the largest magnitude element becomes positive.
+
+    This is similar to `normalize_signs` used for eigendecomposition methods
+    (eigh, fsvd) where only one set of eigenvectors is initially computed.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> eigvecs = np.array([[0.5, -0.7],
+    ...                     [-0.8, -0.3],
+    ...                     [0.3, 0.6]])
+    >>> eigvecs = deterministic_signs(eigvecs)
+    >>> # Now the element with largest absolute value in each column is positive
+
+    """
     max_abs_cols = np.argmax(np.abs(u), axis=0)
     signs = np.sign(u[max_abs_cols, range(u.shape[1])])
-    return signs
+    u *= signs
+    return u
 
 
 def _encapsulate_pca_result(
@@ -436,6 +530,43 @@ def _encapsulate_pca_result(
     feature_ids,
     output_format,
 ):
+    r"""Format PCA results.
+
+    Helper function for converting raw buffers of the pca function
+    into proper OrdinationResults object.
+
+    Parameters
+    ----------
+    long_method_name : str
+        The verbose name of the method used (e.g., "Principal Component
+        Analysis with SVD").
+    eigvals : ndarray
+        Eigenvalues (variance explained by each principal component).
+    coordinates : ndarray
+        Principal component scores for samples (n_samples, n_components).
+    loadings : ndarray
+        Principal component loadings for features (n_features, n_components).
+    proportion_explained : ndarray
+        Proportion of total variance explained by each principal component.
+    sample_ids : array-like
+        Sample identifiers from the input table.
+    feature_ids : array-like
+        Feature identifiers from the input table.
+    output_format : optional
+        Standard table parameters. See :ref:`table_params` for details.
+
+    Returns
+    -------
+    OrdinationResults
+        Object that stores the PCA results, including eigenvalues, the proportion
+        explained by each of them, transformed sample coordinates, and feature
+        loadings.
+
+    See Also
+    --------
+    OrdinationResults
+
+    """
     dimensions = eigvals.shape[0]
     axis_labels = ["PC%d" % i for i in range(1, dimensions + 1)]
     return OrdinationResults(
