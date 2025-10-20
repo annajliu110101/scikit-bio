@@ -8,172 +8,208 @@
 
 from numbers import Integral
 from warnings import warn
+import math
 
 import numpy as np
-import pandas as pd
-from numpy import dot, hstack
-from numpy.linalg import qr, svd
+from numpy.linalg import svd
 from scipy.linalg import eigh
+from sklearn.decomposition import TruncatedSVD
 
-from skbio.util import get_rng
-from skbio.stats.distance import DistanceMatrix
-from skbio.table._tabular import _create_table, _create_table_1d
+from skbio.table._tabular import _create_table, _create_table_1d, _ingest_table
 from ._ordination_results import OrdinationResults
-from ._utils import center_distance_matrix, scale
+from ._utils import scale, _f_matrix_inplace
 from skbio.binaries import (
     pcoa_fsvd_available as _skbb_pcoa_fsvd_available,
     pcoa_fsvd as _skbb_pcoa_fsvd,
 )
-from skbio.util._decorator import params_aliased
+from ._principal_coordinate_analysis import _fsvd
 
 
-@params_aliased(
-    [
-        ("dimensions", "number_of_dimensions", "0.7.0", False),
-        ("distmat", "distance_matrix", "0.7.0", False),
-    ]
-)
-def pcoa(
-    distmat,
-    method="eigh",
+def pca(
+    table,
+    method="svd",
     dimensions=0,
     inplace=False,
     seed=None,
     warn_neg_eigval=0.01,
     output_format=None,
 ):
-    r"""Perform Principal Coordinate Analysis (PCoA).
+    r"""Perform Principal Component Analysis (PCA).
 
-    PCoA is an ordination method similar to Principal Components Analysis (PCA), with
-    the difference that it operates on distance matrices, calculated using meaningful
-    and typically non-Euclidian methods.
+    PCA is a dimensionality reduction technique that transforms a dataset into
+    a new coordinate system where the greatest variance by any projection of
+    the data comes to lie on the first coordinate (called the first principal
+    component), the second greatest variance on the second coordinate, and so on.
 
     Parameters
     ----------
-    distmat : DistanceMatrix
-        The input distance matrix.
-    method : str, optional
-        Matrix decomposition method to use. Default is "eigh" (eigendecomposition),
-        which computes exact eigenvectors and eigenvalues for all dimensions. The
-        alternate is "fsvd" (fast singular value decomposition), a heuristic that can
-        compute only a given number of dimensions.
+    table : DataFrame, array-like, or sparse matrix
+        The input feature table with shape (n_samples, n_features). Rows represent
+        samples and columns represent features. The table will be mean-centered
+        before decomposition.
+    method : {'svd', 'eigh', 'fsvd'}, optional
+        Matrix decomposition method to use. Default is "svd".
+
+        - "svd": Singular value decomposition, an exact method that computes all
+          principal components. Best for general use cases.
+        - "eigh": Eigendecomposition of the covariance matrix, supports computing
+          a subset of dimensions efficiently for large matrices. Uses the kernel
+          trick to optimize computation based on the relationship between number
+          of samples and features.
+        - "fsvd": Fast singular value decomposition, a randomized approximation
+          method that can be faster for very large datasets when computing a
+          subset of dimensions.
+
     dimensions : int or float, optional
-        Dimensions to reduce the distance matrix to. This number determines how many
-        eigenvectors and eigenvalues will be returned. If an integer is provided, the
-        exact number of dimensions will be retained. If a float between 0 and 1, it
-        represents the fractional cumulative variance to be retained. Default is 0,
-        which will retain the same number of dimensions as the distance matrix.
+        Number of dimensions (principal components) to retain. Default is 0, which
+        retains all dimensions up to the rank of the matrix. If an integer >= 1,
+        retains exactly that number of dimensions. If a float between 0 and 1,
+        represents the target fraction of cumulative variance to be retained, and
+        the minimum number of dimensions to achieve this variance will be computed.
     inplace : bool, optional
-        If True, the input distance matrix will be centered in-place to reduce memory
-        consumption, at the cost of losing the original distances. Default is False.
+        If True, the input table will be mean-centered in-place to reduce memory
+        consumption. Only applies to method "svd". Default is False.
     seed : int or np.random.Generator, optional
         A user-provided random seed or random generator instance for method "fsvd".
         See :func:`details <skbio.util.get_rng>`.
-
-        .. versionadded:: 0.6.3
-
     warn_neg_eigval : bool or float, optional
-        Raise a warning if any negative eigenvalue is obtained and its magnitude
-        exceeds the specified fraction threshold compared to the largest positive
-        eigenvalue, which suggests potential inaccuracy in the PCoA result. Default is
-        0.01. Set True to warn regardless of the magnitude. Set False to disable
-        warning completely.
-
-        .. versionadded:: 0.6.3
-
+        Raise a warning if any negative eigenvalue is obtained. Should only occur
+        due to numerical precision issues. If a float between 0 and 1, warns if
+        the magnitude of the negative eigenvalue exceeds this fraction relative to
+        the sum of all eigenvalues. Default is 0.01. Set True to warn for any
+        negative eigenvalue. Set False to disable warning.
     output_format : optional
         Standard table parameters. See :ref:`table_params` for details.
 
     Returns
     -------
     OrdinationResults
-        Object that stores the PCoA results, including eigenvalues, the proportion
-        explained by each of them, and transformed sample coordinates.
+        Object that stores the PCA results, including:
+
+        - eigvals: The variance explained by each principal component (eigenvalues
+          divided by n_samples - 1).
+        - samples: Principal component scores (coordinates) for each sample.
+        - features: Principal component loadings for each feature.
+        - proportion_explained: Proportion of total variance explained by each
+          principal component.
 
     See Also
     --------
+    pcoa
     OrdinationResults
 
     Notes
     -----
-    Principal Coordinate Analysis (PCoA) was first described in [1]_.
+    Principal Component Analysis (PCA) is a fundamental technique in multivariate
+    statistics and machine learning. It performs an orthogonal transformation to
+    convert potentially correlated features into linearly uncorrelated principal
+    components.
 
-    This function uses a choice of two methods for matrix decomposition: The default
-    method, ``eigh``, performs eigendecomposition, an exact method that computes all
-    eigenvectors and eigenvalues. The alternative method, ``fsvd``, performs fast
-    singular value decomposition (FSVD) [2]_, an efficient heuristic method that
-    allows a custom number of dimensions to be specified to reduce calculation at the
-    cost of losing accuracy. The degree of accuracy lost is dependent on dataset.
+    This implementation provides three decomposition methods:
 
-    Note that the default method ``eigh`` does not natively support a given number of
-    dimensions to reduce a matrix to. Therefore, if this parameter is specified, all
-    eigenvectors and eigenvalues will be simply be computed with no speed gain, and
-    only the specified number of dimensions will be returned.
+    **SVD Method**
+        Uses numpy's full SVD to decompose the mean-centered data matrix X as:
+        X = U * S * V^T, where columns of U are the left singular vectors
+        (coordinates in sample space), S contains singular values, and columns
+        of V are the right singular vectors (loadings in feature space).
+        Eigenvalues are computed as S^2.
 
-    Eigenvalues represent the magnitude of individual principal coordinates, and
-    they are usually positive. However, negative eigenvalues can occur when the
-    distances were calculated using a non-Euclidean metric that does not satisfy
-    triangle inequality. If the negative eigenvalues are small in magnitude compared
-    to the largest positive eigenvalue, it is usually safe to ignore them. However,
-    large negative eigenvalues may indicate result inaccuracy, in which case a warning
-    message will be displayed. The paramter ``warn_neg_eigval`` controls the threshold
-    for the warning.
+    **Eigendecomposition Methods (eigh, fsvd)**
+        Use the kernel trick for efficiency: when n_samples << n_features,
+        compute eigenvectors from the covariance matrix (X @ X^T); when
+        n_features < n_samples, compute from the Gram matrix (X^T @ X). This
+        approach is more efficient but squares the condition number of the matrix,
+        which may lead to numerical instabilities in ill-conditioned data.
 
-    PCoA on Euclidean distances is equivalent to Principal Component Analysis (PCA).
-    However, in ecology, the Euclidean distance preserved by PCA is often not a good
-    choice because it deals poorly with double zeros. For example, species have
-    unimodal distributions along environmental gradients. If a species is absent from
-    two sites simultaneously, it can't be known if an environmental variable is too
-    high in one of them and too low in the other, or too low in both, etc. On the other
-    hand, if a species is present in two sites, that means that the sites are similar.
+        The eigh method uses SciPy's eigendecomposition and can efficiently
+        compute a subset of eigenvalues when the subset is small relative to
+        the matrix rank. The fsvd method uses randomized algorithms for
+        approximate decomposition.
 
-    Note that the returned eigenvectors are not normalized to unit length.
+    **Sign Normalization**
+        To ensure reproducibility and consistency across runs, the signs of
+        eigenvectors are normalized so that the element with the largest
+        absolute value in each column is positive.
+
+    **Variance Explained**
+        The proportion of variance explained by each principal component is
+        computed as eigenvalue / sum(all eigenvalues). The sum of all
+        eigenvalues equals the trace of the covariance matrix.
 
     References
     ----------
-    .. [1] Gower, J. C. (1966). Some distance properties of latent root and vector
-       methods used in multivariate analysis. Biometrika, 53(3-4), 325-338.
+    .. [1] Pearson, K. (1901). On lines and planes of closest fit to systems of
+       points in space. The London, Edinburgh, and Dublin Philosophical Magazine
+       and Journal of Science, 2(11), 559-572.
 
-    .. [2] Halko, N., Martinsson, P. G., Shkolnisky, Y., & Tygert, M. (2011). An
-       algorithm for the principal component analysis of large data sets. SIAM
-       Journal on Scientific computing, 33(5), 2580-2594.
+    .. [2] Hotelling, H. (1933). Analysis of a complex of statistical variables
+       into principal components. Journal of educational psychology, 24(6), 417.
+
+    .. [3] Halko, N., Martinsson, P. G., & Tropp, J. A. (2011). Finding structure
+       with randomness: Probabilistic algorithms for constructing approximate
+       matrix decompositions. SIAM review, 53(2), 217-288.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from skbio.stats.ordination import pca
+
+    Create a simple feature table with 4 samples and 3 features:
+
+    >>> data = np.array([[2.5, 2.4],
+    ...                  [0.5, 0.7],
+    ...                  [2.2, 2.9],
+    ...                  [1.9, 2.2],
+    ...                  [3.1, 3.0]])
+
+    Perform PCA using the default SVD method:
+
+    >>> result = pca(data)
+    >>> print(result.proportion_explained)  # doctest: +SKIP
+    [0.96... 0.03...]
+
+    Retain only components explaining 95% of variance:
+
+    >>> result = pca(data, dimensions=0.95)
+    >>> result.samples.shape  # doctest: +SKIP
+    (5, 1)
 
     """
-    # this converts to redundant form, regardless of input type
-    distmat = DistanceMatrix(distmat)
+    feature_table, sample_ids, feature_ids = _ingest_table(table)
 
-    # If no dimension specified, by default will compute all eigenvectors
-    # and eigenvalues
+    # Maximum possible rank for the input samples x features table
+    rank_max = min(feature_table.shape)  # maximum possible rank of the input table
+
     if dimensions == 0:
-        if method == "fsvd" and distmat.data.shape[0] > 10:
+        if method == "fsvd" and rank_max > 10:
             warn(
-                "FSVD: since no value for dimensions is specified, "
-                "PCoA for all dimensions will be computed, which may "
+                "FSVD: since no value for number_of_dimensions is specified, "
+                "PCA for all dimensions will be computed, which may "
                 "result in long computation time if the original "
-                "distance matrix is large.",
+                "feature table is large and/or if number of features"
+                "is similar or larger than the number of samples",
                 RuntimeWarning,
             )
-        elif method == "eigh" and distmat.data.shape[0] > 10:
-            warn(
-                "EIGH: since no value for dimensions is specified, "
-                "PCoA for all dimensions will be computed, which may "
-                "result in long computation time if the original "
-                "distance matrix is large.",
-                RuntimeWarning,
-            )
-
-        # distmat is guaranteed to be square
-        dimensions = distmat.data.shape[0]
+        dimensions = rank_max
     elif dimensions < 0:
         raise ValueError(
-            "Invalid operation: cannot reduce distance matrix "
-            "to negative dimensions using PCoA. Did you intend "
+            "Invalid operation: cannot reduce table "
+            "to negative dimensions using PCA. Did you intend "
             'to specify the default value "0", which sets '
-            "the dimensions equal to the "
-            "dimensionality of the given distance matrix?"
+            "the number_of_dimensions equal to the "
+            "number of features in the given table?"
         )
-    elif dimensions > distmat.data.shape[0]:
-        raise ValueError("Invalid operation: cannot extend distance matrix size.")
+    elif dimensions > max(feature_table.shape):
+        raise ValueError("Invalid operation: cannot extend past size of matrix.")
+    elif dimensions > rank_max:
+        warn(
+            "The number of non-negative singular values / eigenvectors"
+            "are bounded by the rank of the feature table.  At maximum,"
+            "it is min(n_samples, n_features).  The maximum rank will be"
+            "calculated instead.",
+            RuntimeWarning,
+        )
+        dimensions = rank_max
     elif not isinstance(dimensions, Integral) and dimensions > 1:
         raise ValueError(
             "Invalid operation: A floating-point number greater than 1 cannot be "
@@ -186,204 +222,246 @@ def pcoa(
             "and 1."
         )
 
-    # new parameter for ndim = number of dimensions (accounting for
-    # non-int values)
-    ndim = dimensions
+    n_samples, n_features = feature_table.shape
+    in_sample_space = n_samples <= n_features
 
-    # Perform eigendecomposition
-    if method == "eigh":
-        long_method_name = "Principal Coordinate Analysis"
-        # Center distance matrix, a requirement for PCoA here
-        matrix_data = center_distance_matrix(distmat.data, inplace=inplace)
-        if 0 < dimensions < 1:
-            if matrix_data.shape[0] > 10:
-                warn(
-                    "EIGH: since value for dimensions is specified as float,"
-                    " PCoA for all dimensions will be computed, which may"
-                    " result in long computation time if the original"
-                    " distance matrix is large."
-                    " Consider specifying an integer value to optimize performance.",
-                    RuntimeWarning,
-                )
-            ndim = matrix_data.shape[0]
-        subidx = [matrix_data.shape[0] - ndim, matrix_data.shape[0] - 1]
-        eigvals, eigvecs = eigh(matrix_data, subset_by_index=subidx)
-    elif method == "fsvd":
-        long_method_name = "Approximate Principal Coordinate Analysis using FSVD"
-        if 0 < dimensions < 1:
-            if distmat.data.shape[0] > 10:
-                warn(
-                    "FSVD: since value for dimensions is specified as float,"
-                    " PCoA for all dimensions will be computed, which may"
-                    " result in long computation time if the original"
-                    " distance matrix is large."
-                    " Consider specifying an integer value to optimize performance.",
-                    RuntimeWarning,
-                )
-            ndim = distmat.data.shape[0]
-        if _skbb_pcoa_fsvd_available(
-            distmat.data, dimensions, inplace, seed
-        ):  # pragma: no cover
-            # unlikely to throw here, but just in case
-            try:
-                eigvals, coordinates, proportion_explained = _skbb_pcoa_fsvd(
-                    distmat.data, dimensions, inplace, seed
-                )
-                return _encapsulate_pcoa_result(
-                    long_method_name,
-                    eigvals,
-                    coordinates,
-                    proportion_explained,
-                    distmat.ids,
-                    output_format,
-                )
-            except Exception as e:
-                warn(
-                    "Attempted to use binaries.pcoa_fsvd but failed, "
-                    "using regular logic instead.",
-                    RuntimeWarning,
-                )
-        # if we got here, we could not use skbb
-        # Center distance matrix, a requirement for PCoA here
-        matrix_data = center_distance_matrix(distmat.data, inplace=inplace)
+    if method == "svd":
+        feature_table = scale(feature_table, with_std=False, copy=not inplace)
 
-        eigvals, eigvecs = _fsvd(matrix_data, ndim, seed=seed)
+        # SVD returns C-CONTIGUOUS U, S, Vt
+        U, S, Vt = svd(feature_table, full_matrices=False)
+        U, V = normalize_signs(U, Vt.T)
+
+        long_method_name = f"Principal Component Analysis with SVD"
+
+        # Compute eigenvalues now to unify post-processing
+        # downstream.  If eigenvalues were left as singular
+        # values, the proportions explained would be incorrect.
+        eigvals = S**2
     else:
-        raise ValueError(
-            "PCoA eigendecomposition method {} not supported.".format(method)
-        )
-    # Ensure dimensions does not exceed available dimensions
-    # dimensions = min(dimensions, eigvals.shape[0])
+        ndim = dimensions
+        if 0 < dimensions < 1:
+            # See mathematical proof in github README
+            ndim = math.ceil(rank_max * dimensions)
+            if ndim > 10:
+                warn(
+                    f"{method.upper()}: since value for number_of_dimensions"
+                    " is specified as float,"
+                    " PCA for all dimensions will be computed, which may"
+                    " result in long computation time if the original"
+                    " distance matrix is large."
+                    " Consider specifying an integer value to optimize"
+                    " performance.",
+                    RuntimeWarning,
+                )
 
-    # cogent makes eigenvalues positive by taking the
-    # abs value, but that doesn't seem to be an approach accepted
-    # by L&L to deal with negative eigenvalues. We raise a warning
-    # in that case. First, we make values close to 0 equal to 0.
-    negative_close_to_zero = np.isclose(eigvals, 0)
-    eigvals[negative_close_to_zero] = 0
+        # It is more numerically stable and more efficient to use the kernel
+        # trick; specifically compute covariance matrix  (A @ A.T) when
+        # samples << features or vice versa (A.T @ A). Then, eigensolver
+        # returns eigenvectors in sample space from  a covariance matrix
+        # (A @ A.T) or in feature space from a G matrix (A.T @ A).
+        if in_sample_space:
+            # Computed using native skbio function for efficiency and potntially
+            # for later optimizations The feature table is transposed to unify
+            # downstream post-processing  since the eigenvectors returned are
+            # equivalently U from SVD, and we want to compute V later by
+            # projecting onto the feature space (hence the transpose). This
+            # means we do not need to center the output when project
+            matrix_data = feature_table @ feature_table.T
+            matrix_data = _f_matrix_inplace(matrix_data)
+            feature_table = feature_table.T
+        else:
+            # The feature table and the mean are both in feature space so the
+            # outer product works  to center the columns of the intermediate
+            # matrix computed in feature space without touching the original.
+            # Will need to save the mean later to get the coordinates which
+            # still need to be centered.
+            mean = feature_table.mean(axis=0)
+            matrix_data = feature_table.T @ feature_table
+            matrix_data -= n_samples * mean[:, None] * mean[None, :]
 
-    # eigvals might not be ordered, so we first sort them, then analogously
-    # sort the eigenvectors by the ordering of the eigenvalues too
-    idxs_descending = eigvals.argsort()[::-1]
-    eigvals = eigvals[idxs_descending]
-    eigvecs = eigvecs[:, idxs_descending]
+        if method == "eigh":
+            # Under the hood, lapack's 'evr' or 'evx' calls DSTEBZ and
+            # DSTEIN to compute the subset of eigenvalues and eigenvectors.
+            # This is more efficient than computing the full decomposition
+            # when only a subset is needed, if the subset is small compared
+            # to the rank of matrix.  However, as dimensions approaches rank_max,
+            # the efficiency gain is reduced, and actually becomes slower than
+            # computing the full decomposition.  The current cutoff is currently
+            # a rough estimate, will need to be tuned based on benchmarking.
+            subidx = [rank_max - ndim, rank_max - 1]
+            if ndim >= 0.3 * rank_max:
+                subidx = None
 
-    # large negative eigenvalues suggest result inaccuracy
-    # see: https://github.com/scikit-bio/scikit-bio/issues/1410
-    if warn_neg_eigval and eigvals[-1] < 0:
-        if warn_neg_eigval is True or -eigvals[-1] > eigvals[0] * warn_neg_eigval:
-            warn(
-                "The result contains negative eigenvalues that are large in magnitude,"
-                " which may suggest result inaccuracy. See Notes for details. The"
-                " negative-most eigenvalue is {0} whereas the largest positive one is"
-                " {1}.".format(eigvals[-1], eigvals[0]),
-                RuntimeWarning,
+            eigvals, eigvecs = eigh(matrix_data, subset_by_index=subidx)
+            long_method_name = (
+                f"Principal Component Analysis Using Full Eigendecomposition"
             )
 
-    # If we return only the coordinates that make sense (i.e., that have a
-    # corresponding positive eigenvalue), then Jackknifed Beta Diversity
-    # won't work as it expects all the OrdinationResults to have the same
-    # number of coordinates. In order to solve this issue, we return the
-    # coordinates that have a negative eigenvalue as 0
-    num_positive = (eigvals >= 0).sum()
-    eigvecs[:, num_positive:] = np.zeros(eigvecs[:, num_positive:].shape)
-    eigvals[num_positive:] = np.zeros(eigvals[num_positive:].shape)
+            signs = deterministic_signs(eigvecs)
+            eigvecs *= signs
 
-    if ndim != distmat.data.shape[0]:
+            eigvals = np.flip(eigvals)
+            eigvecs = np.flip(eigvecs, axis=1)
+
+            # The intermediate matrix is positive semi-definite by definition.
+            # Therefore theoretically there should not be any negative eigenvalues.
+            # However, as this is the only method that does not guard against negative
+            # numbers, and because the kernel trick squares the condition number, we
+            # clip large negative numbers that may arise due to numerical instability.
+            eigvals[eigvals < 0] = 0.0
+
+        elif method == "fsvd":
+            # Note that because the intermediate matrix was computed
+            # the condition number is effectively squared.  This method
+            # should be treated similarly to a randomized svd method,
+            # in that there likely exists numerical instabilities.
+            # Consider using eigh with subset_by_index
+            eigvals, eigvecs = _fsvd(
+                matrix_data,
+                ndim,
+                seed=seed,
+            )
+            long_method_name = "Approximate Principal Component Analysis using FSVD"
+
+            signs = deterministic_signs(eigvecs)
+            eigvecs *= signs
+        else:
+            raise ValueError(
+                "PCA eigendecomposition method {} not supported.".format(method)
+            )
+        # Prepare placeholders for U or V and compute S for unified downstream post
+        # processing
+        S = np.sqrt(eigvals)
+        eigvecs_projected = np.empty((max(n_samples, n_features), 0))
+
+        if in_sample_space:
+            # If intrmediate matrix computed is in sample space (A @ A.T),
+            # then eigvecs are in sample space (U from SVD).  Otherwise
+            # they correspond to V from SVD.
+            U, V = eigvecs, eigvecs_projected
+        else:
+            U, V = eigvecs_projected, eigvecs
+
+    if rank_max == eigvals.shape[0] or eigvals[-1] == 0:
+        sum_eigvals = np.sum(eigvals)
+    else:
         # Since the dimension parameter, hereafter referred to as 'd',
         # restricts the number of eigenvalues and eigenvectors that FSVD
         # computes, we need to use an alternative method to compute the sum
         # of all eigenvalues, used to compute the array of proportions
         # explained. Otherwise, the proportions calculated will only be
         # relative to d number of dimensions computed; whereas we want
-        # it to be relative to the entire dimensionality of the
-        # centered distance matrix.
+        # it to be relative to the number of features in the input table.
 
         # An alternative method of calculating th sum of eigenvalues is by
-        # computing the trace of the centered distance matrix.
+        # computing the trace of the centered feature table.
         # See proof outlined here: https://goo.gl/VAYiXx
-        sum_eigenvalues = np.trace(matrix_data)
-    else:
-        # Calculate proportions the usual way
-        sum_eigenvalues = np.sum(eigvals)
+        sum_eigvals = np.trace(matrix_data)
 
-    proportion_explained = eigvals / sum_eigenvalues
+    proportion_explained = eigvals / sum_eigvals
+
     if 0 < dimensions < 1:
-        cumulative_variance = np.cumsum(proportion_explained)
-        ndim = np.searchsorted(cumulative_variance, dimensions, side="left") + 1
         # gives the number of dimensions needed to reach specified variance
         # updates number of dimensions to reach the requirement of variance.
-        dimensions = ndim
+        cumulative_variance = np.cumsum(proportion_explained)
+        num_dimensions = (
+            np.searchsorted(cumulative_variance, dimensions, side="left") + 1
+        )
 
-    # In case eigh is used, eigh computes all eigenvectors and -values.
-    # So if dimensions was specified, we manually need to ensure
-    # only the requested number of dimensions
-    # (number of eigenvectors and eigenvalues, respectively) are returned.
-    eigvecs = eigvecs[:, :dimensions]
+        dimensions = num_dimensions
+
     eigvals = eigvals[:dimensions]
     proportion_explained = proportion_explained[:dimensions]
 
-    # Scale eigenvalues to have length = sqrt(eigenvalue). This
-    # works because np.linalg.eigh returns normalized
-    # eigenvectors. Each row contains the coordinates of the
-    # objects in the space of principal coordinates. Note that at
-    # least one eigenvalue is zero because only n-1 axes are
-    # needed to represent n points in a euclidean space.
-    coordinates = eigvecs * np.sqrt(eigvals)
+    # Release extra memory to cache to speed up back-projection
+    U = np.asarray(U[:, :dimensions], copy=True)
+    S = np.asarray(S[:dimensions], copy=True)
+    V = np.asarray(V[:, :dimensions], copy=True)
 
-    return _encapsulate_pcoa_result(
+    # U and V are guaranteed to be invertible
+    if V.size == 0:
+        # X = U*S*Vᵗ -> Xᵗ*U = V*S -> V = Xᵗ*U*S⁻¹ = features
+        V = feature_table @ U
+        V /= S[np.newaxis, :]
+
+    if U.size == 0:
+        # X = U*S*Vᵗ -> XV = U*S = coordinates
+        U = feature_table @ V
+        U -= mean @ V
+    else:
+        U *= S
+
+    eigvals /= n_samples - 1
+
+    return _encapsulate_pca_result(
         long_method_name,
         eigvals,
-        coordinates,
+        U,
+        V,
         proportion_explained,
-        distmat.ids,
+        sample_ids,
+        feature_ids,
         output_format,
     )
 
 
-def _encapsulate_pcoa_result(
-    long_method_name, eigvals, coordinates, proportion_explained, ids, output_format
+def normalize_signs(u, v, in_sample_space=True):
+    # to keep the signs consistent (for plotting purposes)
+
+    # SVD (for some reason) returns U, V such that U is C-ordered
+    # and V is Fortran-ordered.  So we're going to use V for sign
+    # normalization since accessing its columns is faster.
+    # columns of u, rows of v_t (columns of v)
+    # take maximum absolute value in each column of u (out = row vector)
+    # do not transpose to keep Fortran orderedness (efficiency) since
+    # accessing columns is faster when matrix is in Fortran order
+    if in_sample_space:
+        max_abs_v_cols = np.argmax(np.abs(u.T), axis=1)
+        shift = np.arange(u.T.shape[0])
+        indices = max_abs_v_cols + shift * u.T.shape[1]
+        signs = np.sign(np.take(np.reshape(u.T, (-1,)), indices, axis=0))
+    else:
+        max_abs_v_cols = np.argmax(np.abs(v), axis=0)
+        shift = np.arange(v.shape[1])
+        indices = max_abs_v_cols + shift * v.shape[0]
+        signs = np.sign(np.take(np.reshape(v, (-1,)), indices, axis=0))
+    u *= signs[np.newaxis, :]
+    v *= signs[np.newaxis, :]
+    return u, v
+
+
+def deterministic_signs(u):
+    max_abs_cols = np.argmax(np.abs(u), axis=0)
+    signs = np.sign(u[max_abs_cols, range(u.shape[1])])
+    return signs
+
+
+def _encapsulate_pca_result(
+    long_method_name,
+    eigvals,
+    coordinates,
+    loadings,
+    proportion_explained,
+    sample_ids,
+    feature_ids,
+    output_format,
 ):
-    r"""Format PCoA results
-
-    Helper function for converting raw buffers of the pcoa function
-    into proper OrdinationResult object.
-
-    Parameters
-    ----------
-    long_method_name: str
-        The verbose name of the method used.
-    eigvals: ndarray
-        Eigenvalues
-    coordinates: ndarray
-        Sample coordinates
-    proportion_explained: ndarray
-        Proportions explained
-    ids: array
-        Distance matrix ids
-    output_format : optional
-        Standard table parameters. See :ref:`table_params` for details.
-
-    Returns
-    -------
-    OrdinationResults
-        Object that stores the PCoA results, including eigenvalues, the proportion
-        explained by each of them, and transformed sample coordinates.
-
-    See Also
-    --------
-    OrdinationResults
-    """
-
     dimensions = eigvals.shape[0]
     axis_labels = ["PC%d" % i for i in range(1, dimensions + 1)]
     return OrdinationResults(
-        short_method_name="PCoA",
+        short_method_name="PCA",
         long_method_name=long_method_name,
         eigvals=_create_table_1d(eigvals, index=axis_labels, backend=output_format),
         samples=_create_table(
             coordinates,
-            index=ids,
+            index=sample_ids,
+            columns=axis_labels,
+            backend=output_format,
+        ),
+        features=_create_table(
+            loadings,
+            index=feature_ids,
             columns=axis_labels,
             backend=output_format,
         ),
@@ -391,207 +469,3 @@ def _encapsulate_pcoa_result(
             proportion_explained, index=axis_labels, backend=output_format
         ),
     )
-
-
-@params_aliased([("dimensions", "number_of_dimensions", "0.7.0", False)])
-def _fsvd(centered_distance_matrix, dimensions=10, seed=None):
-    """Perform singular value decomposition.
-
-    More specifically in this case eigendecomposition, using fast heuristic algorithm
-    nicknamed "FSVD" (FastSVD), adapted and optimized from the algorithm described
-    by Halko et al (2011).
-
-    Parameters
-    ----------
-    centered_distance_matrix : np.array
-       Numpy matrix representing the distance matrix for which the
-       eigenvectors and eigenvalues shall be computed
-    dimensions : int
-       Number of dimensions to keep. Must be lower than or equal to the
-       rank of the given distance_matrix.
-    seed : int or np.random.Generator, optional
-        A user-provided random seed or random generator instance.
-
-    Returns
-    -------
-    np.array
-       Array of eigenvectors, each with dimensions length.
-    np.array
-       Array of eigenvalues, a total number of dimensions.
-
-    Notes
-    -----
-    The algorithm is based on [1]_.
-
-    Ported from MATLAB implementation described in [2]_.
-
-    References
-    ----------
-    .. [1] Halko, N., Martinsson, P. G., Shkolnisky, Y., & Tygert, M. (2011). An
-       algorithm for the principal component analysis of large data sets. SIAM
-       Journal on Scientific computing, 33(5), 2580-2594.
-
-    .. [2] https://stats.stackexchange.com/a/11934/211065
-
-    """
-    m, n = centered_distance_matrix.shape
-
-    # Number of levels of the Krylov method to use.
-    # For most applications, num_levels=1 or num_levels=2 is sufficient.
-    num_levels = 1
-
-    # Changes the power of the spectral norm, thus minimizing the error).
-    use_power_method = False
-
-    # Note: a (conjugate) transpose is removed for performance, since we
-    # only expect square matrices.
-    if m != n:
-        raise ValueError("FSVD expects square distance matrix")
-
-    if dimensions > m or dimensions > n:
-        raise ValueError(
-            "FSVD: dimensions cannot be larger than"
-            " the dimensionality of the given distance matrix."
-        )
-
-    if dimensions < 0:
-        raise ValueError(
-            "Invalid operation: cannot reduce distance matrix "
-            "to negative dimensions using PCoA. Did you intend "
-            'to specify the default value "0", which sets '
-            "the dimensions equal to the "
-            "dimensionality of the given distance matrix?"
-        )
-
-    k = dimensions + 2
-
-    # Form a real nxl matrix G whose entries are independent, identically
-    # distributed Gaussian random variables of zero mean and unit variance
-    rng = get_rng(seed)
-    G = rng.standard_normal(size=(n, k))
-
-    # `use_power_method` is constantly False, so `if` won't start.
-    if use_power_method:  # pragma: no cover
-        # use only the given exponent
-        H = dot(centered_distance_matrix, G)
-
-        for x in range(2, num_levels + 2):
-            # enhance decay of singular values
-            # note: distance_matrix is no longer transposed, saves work
-            # since we're expecting symmetric, square matrices anyway
-            # (Daniel McDonald's changes)
-            H = dot(centered_distance_matrix, dot(centered_distance_matrix, H))
-
-    else:
-        # compute the m x l matrices H^{(0)}, ..., H^{(i)}
-        # Note that this is done implicitly in each iteration below.
-        H = dot(centered_distance_matrix, G)
-        # to enhance performance
-        H = hstack((H, dot(centered_distance_matrix, dot(centered_distance_matrix, H))))
-
-        # `num_levels` is constantly 1, so `for` loop won't start
-        for x in range(3, num_levels + 2):  # pragma: no cover
-            tmp = dot(centered_distance_matrix, dot(centered_distance_matrix, H))
-
-            H = hstack(
-                (H, dot(centered_distance_matrix, dot(centered_distance_matrix, tmp)))
-            )
-
-    # Using the pivoted QR-decomposition, form a real m * ((i+1)l) matrix Q
-    # whose columns are orthonormal, s.t. there exists a real
-    # ((i+1)l) * ((i+1)l) matrix R for which H = QR
-    Q, R = qr(H)
-
-    # Compute the n * ((i+1)l) product matrix T = A^T Q
-    T = dot(centered_distance_matrix, Q)  # step 3
-
-    # Form an SVD of T
-    Vt, St, W = svd(T, full_matrices=False)
-    W = W.transpose()
-
-    # Compute the m * ((i+1)l) product matrix
-    Ut = dot(Q, W)
-
-    U_fsvd = Ut[:, :dimensions]
-
-    S = St[:dimensions]
-
-    # drop imaginary component, if we got one
-    # Note:
-    #   In cogent, after computing eigenvalues/vectors, the imaginary part
-    #   is dropped, if any. We know for a fact that the eigenvalues are
-    #   real, so that's not necessary, but eigenvectors can in principle
-    #   be complex (see for example
-    #   http://math.stackexchange.com/a/47807/109129 for details)
-    eigenvalues = S.real
-    eigenvectors = U_fsvd.real
-
-    return eigenvalues, eigenvectors
-
-
-def pcoa_biplot(ordination, y):
-    """Compute the projection of descriptors into a PCoA matrix.
-
-    Parameters
-    ----------
-    ordination : OrdinationResults
-        The computed principal coordinates analysis of dimensions (n, c) where
-        the matrix ``y`` will be projected onto.
-    y : DataFrame
-        Samples by features table of dimensions (n, m). These can be
-        environmental features or abundance counts. This table should be
-        normalized in cases of dimensionally heterogenous physical variables.
-
-    Returns
-    -------
-    OrdinationResults
-        The modified input object that includes projected features onto the
-        ordination space in the ``features`` attribute.
-
-    Notes
-    -----
-    This implementation is as described in Chapter 9 of [1]_.
-
-    References
-    ----------
-    .. [1] Legendre P. and Legendre L. 1998. Numerical Ecology. Elsevier, Amsterdam.
-
-    """
-    # acknowledge that most saved ordinations lack a name, however if they have
-    # a name, it should be PCoA
-    if ordination.short_method_name != "" and ordination.short_method_name != "PCoA":
-        raise ValueError(
-            "This biplot computation can only be performed in a PCoA matrix."
-        )
-
-    if set(y.index) != set(ordination.samples.index):
-        raise ValueError(
-            "The eigenvectors and the descriptors must describe the same samples."
-        )
-
-    eigvals = ordination.eigvals.values
-    coordinates = ordination.samples
-    N = coordinates.shape[0]
-
-    # align the descriptors and eigenvectors in a sample-wise fashion
-    y = y.reindex(coordinates.index)
-
-    # S_pc from equation 9.44
-    # Represents the covariance matrix between the features matrix and the
-    # column-centered eigenvectors of the pcoa.
-    spc = (1 / (N - 1)) * y.values.T.dot(scale(coordinates, ddof=1))
-
-    # U_proj from equation 9.55, is the matrix of descriptors to be projected.
-    #
-    # Only get the power of non-zero values, otherwise this will raise a
-    # divide by zero warning. There shouldn't be negative eigenvalues(?)
-    Uproj = np.sqrt(N - 1) * spc.dot(
-        np.diag(np.power(eigvals, -0.5, where=eigvals > 0))
-    )
-
-    ordination.features = pd.DataFrame(
-        data=Uproj, index=y.columns.copy(), columns=coordinates.columns.copy()
-    )
-    ordination.features.fillna(0.0, inplace=True)
-
-    return ordination
