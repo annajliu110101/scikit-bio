@@ -31,7 +31,6 @@ def pca(
     dimensions=0,
     inplace=False,
     seed=None,
-    warn_neg_eigval=0.01,
     output_format=None,
 ):
     r"""Perform Principal Component Analysis (PCA).
@@ -72,12 +71,6 @@ def pca(
     seed : int or np.random.Generator, optional
         A user-provided random seed or random generator instance for method "fsvd".
         See :func:`details <skbio.util.get_rng>`.
-    warn_neg_eigval : bool or float, optional
-        Raise a warning if any negative eigenvalue is obtained. Should only occur
-        due to numerical precision issues. If a float between 0 and 1, warns if
-        the magnitude of the negative eigenvalue exceeds this fraction relative to
-        the sum of all eigenvalues. Default is 0.01. Set True to warn for any
-        negative eigenvalue. Set False to disable warning.
     output_format : optional
         Standard table parameters. See :ref:`table_params` for details.
 
@@ -178,7 +171,7 @@ def pca(
     feature_table, sample_ids, feature_ids = _ingest_table(table)
 
     # Maximum possible rank for the input samples x features table
-    rank_max = min(feature_table.shape)  # maximum possible rank of the input table
+    rank_max = min(feature_table.shape)
 
     if dimensions == 0:
         if method == "fsvd" and rank_max > 10:
